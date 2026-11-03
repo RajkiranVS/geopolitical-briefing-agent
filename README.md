@@ -1,8 +1,8 @@
 # Geopolitical News Briefing Agent
 
-A tool-calling AI agent, built with **LangChain** and **LangGraph**, that reads live RSS feeds, fetches the full text of selected articles, and writes a neutral, source-cited geopolitical briefing. The briefing includes a dedicated section on developments affecting India.
+A **LangGraph + Claude** agent that writes geopolitical news briefings citing **only articles it actually read**, and proves it with deterministic checks in plain Python, not an LLM.
 
-The project also includes a **runtime evaluation module** (`evals.py`) with a unit test suite. It checks the agent's output for hallucinated citations, uncited claims, stale news and off-list sources.
+The agent reads live RSS feeds, fetches the full text of selected articles and writes a neutral, attributed briefing with a dedicated section on developments affecting India. After every run, `evals.py` verifies that each citation points to an article the agent fetched, that every bullet is cited, that stories are recent and that every source is on the allowlist. Runs are traced in **LangSmith**, and the evals are covered by a `pytest` suite.
 
 ---
 
@@ -23,9 +23,11 @@ The project also includes a **runtime evaluation module** (`evals.py`) with a un
   - [Running the Tests](#running-the-tests)
 - [CI/CD](#cicd)
 - [Using the Evaluations](#using-the-evaluations)
+- [How the Evals Evolved](#how-the-evals-evolved)
 - [Customisation](#customisation)
 - [Known Limitations](#known-limitations)
 - [Roadmap](#roadmap)
+- [License](#license)
 
 ---
 
@@ -33,9 +35,10 @@ The project also includes a **runtime evaluation module** (`evals.py`) with a un
 
 - **Agentic tool use**: the model decides which feeds to read and which articles to open, using two tools: `get_headlines` and `fetch_article`.
 - **Grounded output**: the system prompt tells the model to summarise only what the fetched articles say, attribute every claim, and cite the exact article link.
-- **Restricted sources**: only three allow-listed RSS feeds (BBC World, The Hindu International and Google News "India foreign affairs") may be used.
-- **Bounded execution**: the agent fetches at most 5 articles, retries a failed fetch at most once, and stops after 15 tool-calling rounds to prevent infinite loops.
-- **Runtime evals**: deterministic checks verify that citations were actually fetched, that every bullet is cited, that stories are recent, and that sources come from allowed domains. The results are written to a JSON report.
+- **Domain allowlist enforced in the tools**: both tools refuse any URL whose scheme isn't `http`/`https` or whose host isn't on the allowlist, *before* making a network call. The same `is_allowed_domain` function is used by the tools and by the eval, so the guardrail and the check can never disagree.
+- **Bounded execution, enforced in code**: `fetch_article` refuses after 5 articles (not just a prompt instruction), and the agent stops after 15 tool-calling rounds.
+- **Runtime evals on every run**: `main()` calls `run_evals()` after the agent finishes. Deterministic checks verify that citations were actually fetched, that every bullet is cited, that stories are recent, and that sources come from allowed domains. The results are printed and written to a JSON report.
+- **Prompt–eval contracts**: fixed strings shared by the prompt and the eval (`FETCH NOTES:` and the empty-section placeholder) keep run notes and "nothing to report" lines from being misread as uncited claims.
 - **Unit tested**: a `pytest` suite covers URL normalisation, citation extraction, the uncited-item detection, freshness boundaries and the full eval pipeline.
 
 ---
@@ -43,13 +46,14 @@ The project also includes a **runtime evaluation module** (`evals.py`) with a un
 ## Project Structure
 
 ```
-LangSmith Practice/
+geopolitical-briefing-agent/
 ├── geopolitical_news_agent.py   # Agent: model, tools, LangGraph loop and entry point
 ├── evals.py                     # Runtime evaluation checks for the briefing output
 ├── pytest.ini                   # pytest config (adds project root to path, sets test dir)
 ├── requirements.txt             # Python dependencies
 ├── .env.example                 # Template for the required credentials
 ├── .gitignore
+├── LICENSE                      # MIT
 ├── tests/
 │   └── test_evals.py            # Unit tests for evals.py
 ├── .github/
@@ -89,14 +93,14 @@ The agent is built with the LangGraph **Functional API** (`@entrypoint` and `@ta
 1. **`call_llm`**: sends the system prompt and message history to `claude-haiku-5-5`, which has the tools bound to it.
 2. **`call_tool`**: runs each tool call the model requested.
 3. **`agent`** (entrypoint): repeats steps 1 and 2 until the model stops requesting tools, then returns the full message list.
-4. The script then takes the text of the final message, removes any `<think>…</think>` blocks, and prints the briefing.
+4. **`main()`** clears the run state, asks for the user's request, runs the agent, prints the final briefing and then calls **`run_evals()`** on it, using the `fetched` and `headline_meta` dictionaries the tools filled during the run.
 
 ### Tools
 
 | Tool | Purpose | Behaviour |
 |------|---------|-----------|
-| `get_headlines(feed_url)` | Discover stories | Parses an RSS feed with `feedparser` and returns up to **15** numbered items (title, published date, link, summary). Returns `FETCH_FAILED: <url>` if the feed is empty. |
-| `fetch_article(url)` | Read a story | Downloads and extracts the article body with `trafilatura`, truncates it at a `Published -` footer if one is present, caps it at **4,000 characters**, and appends `Source: <url>`. Returns `FETCH_FAILED: <url>` on failure. |
+| `get_headlines(feed_url)` | Discover stories | Refuses non-allowlisted URLs before fetching. Parses the RSS feed with `feedparser` and returns up to **15** numbered items (title, published date, link, summary). Records each `link → published` date in `headline_meta` (normalised URL as key) for the freshness check. Returns `FETCH_FAILED: <url>` if the feed is empty. |
+| `fetch_article(url)` | Read a story | Refuses non-allowlisted URLs, then refuses once **5** articles have been fetched (`FETCH_LIMIT_REACHED`). Otherwise downloads and extracts the article body with `trafilatura`, truncates it at a `Published -` footer if present, caps it at **4,000 characters**, records exactly that text in `fetched` and returns it with `Source: <url>`. Failed fetches return `FETCH_FAILED: <url>` and don't count toward the limit. |
 
 ### News Sources
 
@@ -112,7 +116,8 @@ The system prompt asks for this format:
 
 1. **3–5 key developments**, each attributed to its source and cited with the exact article link.
 2. **A section on developments affecting India.**
-3. If a section has nothing to report, the briefing says so explicitly. For example: *"Nothing significant to report."*
+3. If a section has nothing to report, it contains exactly `Nothing to report from the fetched articles.`
+4. A final line starting with `FETCH NOTES:` lists any feed or fetch problems. Only stories whose article was fetched successfully are reported; headline-only items are left out.
 
 ---
 
@@ -125,7 +130,8 @@ The system prompt asks for this format:
 | `normalize_url(url)` | Lowercases the scheme and host, and strips the query string, fragment and trailing slash, so that the same article always compares equal. | Normalised URL |
 | `extract_citations(briefing)` | Finds every URL in the briefing, including Markdown links and URLs wrapped in brackets or followed by punctuation. | Sorted, de-duplicated list of normalised URLs |
 | `check_cited_were_fetched(cited, fetched)` | Detects **hallucinated citations**, meaning URLs that were cited but never fetched. | `(verified, unverified)` |
-| `check_uncited_items(briefing)` | Groups bullet and numbered items, including their continuation lines, and flags any item without a URL. Short empty-section placeholders (under 15 words) are allowed. | List of flagged items |
+| `is_allowed_domain(url, allowed_domains)` | Shared allowlist rule used by the tools and the eval: `http`/`https` only, a real hostname, and host equal to an allowed domain or a subdomain of it (so `evilbbc.com` and `bbc.com@evil.com` are refused). | `bool` |
+| `check_uncited_items(briefing)` | Ignores everything after `FETCH NOTES:`, groups bullet and numbered items with their continuation lines, and flags any item without a URL. Short empty-section placeholders are allowed. | List of flagged items |
 | `check_freshness(cited, headline_meta, max_hours=72, now=None)` | Flags stories older than `max_hours`, using RFC 2822 feed dates. | `(stale, unknown_date)` |
 | `check_allowed_sources(cited, allowed_domains)` | Flags citations whose domain, or parent domain, is not on the allow-list. | List of off-list URLs |
 | `check_grounding(item, article_text)` | A lightweight hallucination heuristic: numbers and capitalised words in an item must appear in the source article. | List of missing entities |
@@ -190,7 +196,7 @@ The credentials this project needs are listed in [`.env.example`](.env.example):
 | `LANGSMITH_TRACING` | No | Set to `true` to send traces to LangSmith. |
 | `LANGSMITH_API_KEY` | Only if tracing | API key from [LangSmith](https://smith.langchain.com/) under **Settings → API Keys**. |
 | `LANGSMITH_PROJECT` | No | The LangSmith project that traces are logged to. If it is unset, traces go to `default`. |
-| `LANGSMITH_ENDPOINT` | No | The LangSmith API URL. The default is the US endpoint; use `https://eu.api.smith.langchain.com` for the EU region. |
+| `LANGSMITH_ENDPOINT` | No | The LangSmith API URL. The default is the US endpoint; use `https://eu.api.smith.langchain.com` for EU or `https://apac.api.smith.langchain.com` for APAC workspaces (a `403` usually means the wrong region). |
 
 **1. Create your `.env` file** from the template and fill in your keys:
 
@@ -248,7 +254,7 @@ When LangSmith tracing is enabled, each run, including every LLM call and tool c
 python geopolitical_news_agent.py
 ```
 
-The briefing is printed between these markers:
+The script asks for your request (for example, *"Brief me on today's geopolitical news for India"*). The briefing is printed between these markers, followed by the eval report:
 
 ```
 --- RAW BRIEFING TEXT EXTRACTED ---
@@ -256,7 +262,7 @@ The briefing is printed between these markers:
 -----------------------------------
 ```
 
-> **Note:** the agent runs when the module is imported, because the invocation sits at module level. Importing `geopolitical_news_agent` from another script will therefore start a briefing run.
+The run logic lives in `main()` behind `if __name__ == "__main__":`, so importing the module (for example from tests or CI) makes no API or network calls.
 
 ### Running the Tests
 
@@ -272,12 +278,12 @@ pytest -k fresh   # run only the freshness tests
 
 ## CI/CD
 
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on pushes to `main`, on pull requests, and on manual dispatch. It has two jobs:
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) has two jobs. The deterministic `tests` job is the only gate; the Claude review is advisory.
 
 | Job | What it does | Fails the build when |
 |-----|--------------|----------------------|
-| `tests` | Byte-compiles every module, runs `ruff` (informational only) and runs `pytest` on Python 3.10 and 3.12. | Compilation or any test fails |
-| `claude-evaluation` | Runs Claude Code in headless mode (`claude -p`) with the prompt in [`.github/claude/review-prompt.md`](.github/claude/review-prompt.md). Claude reads the whole repo, runs pytest, compileall, ruff and pip-audit, and can write throwaway probe tests to confirm suspected bugs. It then scores nine dimensions: correctness, agent design, security, eval quality, tests, code quality, dependencies, docs accuracy and CI. | Tests fail, or Claude reports a critical or high finding |
+| `tests` (push to `main`, PRs, manual) | Byte-compiles every module, runs `ruff` (informational only) and runs `pytest` on Python 3.10 and 3.12. | Compilation or any test fails |
+| `claude-evaluation` (PRs and manual only) | Runs Claude Code in headless mode (`claude -p`) with the prompt in [`.github/claude/review-prompt.md`](.github/claude/review-prompt.md). Claude reads the whole repo, runs pytest, compileall, ruff and pip-audit, and can write throwaway probe tests to confirm suspected bugs. It then scores nine dimensions: correctness, agent design, security, eval quality, tests, code quality, dependencies, docs accuracy and CI. Never: the verdict is reported as a warning, because an LLM's verdict can vary between runs on the same code |
 
 Claude can use these tools: `Read`, `Glob`, `Grep`, `Write` and `TodoWrite`, plus a Bash allow-list for pytest, compileall, ruff, pip-audit, pip, read-only git commands, `ls` and `wc`. `Edit` and web access are blocked. Claude is told not to run the agent script, because that would make live API and network calls.
 
@@ -286,7 +292,7 @@ The report goes to the job summary and is posted as a comment on PRs (the commen
 **Setup:**
 
 1. In the GitHub repo, go to **Settings → Secrets and variables → Actions** and add the secret `ANTHROPIC_API_KEY`.
-2. *(Optional)* To use a different model, add a repository **variable** `CLAUDE_MODEL`, for example `claude-sonnet-5-5`. The default is `claude-opus-5-5`.
+2. *(Optional)* To use a different model, add a repository **variable** `CLAUDE_MODEL`. The default is `claude-sonnet-5-5`, capped at 25 turns. The review runs only on PRs and manual dispatch, to keep API cost predictable.
 
 PRs from forks don't receive secrets, so the Claude job is skipped for them.
 
@@ -319,9 +325,20 @@ if not report["passed"]:
     print("Briefing failed validation:", report)
 ```
 
-> The agent script does **not** call `run_evals` automatically yet. To build `fetched` and `headline_meta`, collect the tool results from the agent's returned message list: the `fetch_article` outputs give the article text, and the `get_headlines` outputs give the `Link` and `Published` fields.
+> The agent script already does this: the tools fill the module-level `fetched` and `headline_meta` dictionaries during a run, `main()` clears them at the start of each run, and calls `run_evals()` at the end.
 
 ---
+
+## How the Evals Evolved
+
+The first live runs failed, and each failure was a real finding. Every fix landed with a regression test.
+
+| Run | Eval result | Cause | Fix |
+|-----|-------------|-------|-----|
+| 1 | **FAIL**: 0 verified, 5 cited-but-not-read, 5 unknown dates | The briefing wrapped URLs in Markdown italics (`*Source: …*`), and the URL regex captured the trailing `*`, so no citation matched. The BBC feed was also refused: its host `feeds.bbci.co.uk` wasn't allowlisted. | Excluded `*` from URL matches; added `bbci.co.uk` |
+| 2 | **FAIL**: 2 uncited bullets | Bullets describing fetch problems were read as uncited news claims. | `FETCH NOTES:` marker: the prompt puts run notes after it, and the eval ignores everything after it |
+| 3 | **FAIL**: 1 uncited bullet | The model added a "the articles don't cover…" bullet. | Fixed empty-section phrase shared by prompt and eval; prompt forbids "what wasn't covered" bullets |
+| 4 | **PASS**: 3 verified, 0 issues | | |
 
 ## Customisation
 
@@ -332,7 +349,7 @@ if not report["passed"]:
 | Headlines per feed | `limit = 15` in `get_headlines` |
 | Article length sent to the model | `article_text[:4000]` in `fetch_article` |
 | Maximum agent rounds | `if rounds > 15` in `agent` |
-| User request | The `HumanMessage` content at the bottom of the agent script |
+| User request | Typed at the prompt when `main()` runs |
 | Allowed citation domains | `DEFAULT_ALLOWED_DOMAINS` in `evals.py` |
 | Freshness window | The `max_hours` argument of `check_freshness` (default 72) |
 | Accepted empty-section phrases | `allowed_placeholders` in `check_uncited_items` |
@@ -342,7 +359,8 @@ if not report["passed"]:
 ## Known Limitations
 
 - **Citations are checked for provenance, not accuracy.** The evals prove that every cited URL points to an article the agent actually fetched. They do not prove that the claim next to the citation is supported by that article. A bullet can cite a real, fetched article and still misstate what it says, and no check in `run_evals` would catch it.
-- **Evals are not wired into the agent.** `run_evals` must be called separately, as described in [Using the Evaluations](#using-the-evaluations).
+- **India-focused.** The prompt and the Google News feed are set up for India; briefings for other countries would need the prompt and feed query changed.
+- **The 5-article cap has a race.** Tool calls from a single model turn run in parallel, so if the model requests six fetches at once, all six can pass the `len(fetched) >= 5` check before any is recorded. A lock around check-and-reserve would close it.
 - **`check_grounding` is a heuristic.** It matches surface tokens (numbers and capitalised words), so paraphrases or differences in number formatting can produce false positives. It is also not called by `run_evals`.
 - **Google News links are redirects.** Google News RSS items point to `news.google.com` URLs rather than to the publisher, which is why `google.com` is on the default allow-list. `trafilatura` usually can't follow these redirects, so `fetch_article` typically returns `FETCH_FAILED` for Google News items. Because the agent only reports stories it fetched, the Google News feed rarely contributes to the briefing.
 - **Freshness depends on feed metadata.** Stories without a parseable `Published` date are reported as `unknown_date`, not as stale.
@@ -356,3 +374,9 @@ if not report["passed"]:
   - Normalise both sides before comparing: curly to straight quotes, collapsed whitespace, unified dashes and apostrophes.
   - Compare against the full fetched text, not only the 4,000-character excerpt sent to the model, and report which case applied.
   - Treat a quote that is missing from its cited article as a **failure**, not a warning, and add it to the report as `unverified_quotes`.
+
+---
+
+## License
+
+[MIT](LICENSE) © 2026 Rajkiran Veldur
