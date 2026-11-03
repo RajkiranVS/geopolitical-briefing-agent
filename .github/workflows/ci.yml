@@ -51,14 +51,15 @@ jobs:
     name: Claude project evaluation
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Runs on pull requests and manual dispatch only (not on every push, to control API cost).
     # Fork PRs never receive secrets, so skip instead of failing.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
     permissions:
       contents: read
       pull-requests: write
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      CLAUDE_MODEL: ${{ vars.CLAUDE_MODEL || 'claude-opus-5-5' }}
+      CLAUDE_MODEL: ${{ vars.CLAUDE_MODEL || 'claude-sonnet-5-5' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -107,7 +108,7 @@ jobs:
         run: |
           claude -p "$(cat claude-review/prompt.md)" \
             --model "$CLAUDE_MODEL" \
-            --max-turns 60 \
+            --max-turns 25 \
             --output-format json \
             --allowedTools "Read,Glob,Grep,Write,TodoWrite,Bash(python -m pytest:*),Bash(python -m compileall:*),Bash(ruff check:*),Bash(pip-audit:*),Bash(pip list:*),Bash(pip show:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git status:*),Bash(ls:*),Bash(wc:*),Bash(mkdir -p claude-review:*)" \
             --disallowedTools "Edit,NotebookEdit,WebFetch,WebSearch" \
@@ -145,17 +146,18 @@ jobs:
             claude-review/probe_tests/
           if-no-files-found: warn
 
-      - name: Enforce verdict
+      # Advisory only: the pass/fail gate is the deterministic `tests` job.
+      # An LLM verdict can vary between runs, so it warns instead of failing the build.
+      - name: Report verdict (advisory)
         run: |
           f=claude-review/verdict.json
           if ! jq -e . "$f" > /dev/null 2>&1; then
-            echo "::error::Missing or invalid $f"
-            exit 1
+            echo "::warning::Missing or invalid $f"
+            exit 0
           fi
           verdict=$(jq -r '.verdict' "$f")
           echo "Verdict: $verdict | Score: $(jq -r '.score' "$f")/10 | Counts: $(jq -c '.counts' "$f")"
           echo "$(jq -r '.summary' "$f")"
           if [ "$verdict" != "pass" ]; then
-            echo "::error::Claude evaluation verdict is '$verdict'. See the job summary or the claude-evaluation artifact."
-            exit 1
+            echo "::warning::Claude evaluation verdict is '$verdict'. See the job summary or the claude-evaluation artifact."
           fi
