@@ -1,0 +1,6 @@
+langchain
+langchain-anthropic
+langgraph
+feedparser
+trafilatura
+pytest
