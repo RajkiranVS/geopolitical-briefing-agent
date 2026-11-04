@@ -10,14 +10,20 @@ import email.utils
 from datetime import datetime, timezone
 
 #Global Patterns
-# '*' is never part of a URL (Markdown emphasis). '_' can appear inside URLs,
-# so it is only rejected as the final character.
-URL_PATTERN = r'https?://[^\s()<>*]+[^\s()<>.,:;\'"\?*_]'
+# '*', square brackets, and double or curly quotes are never part of a URL (Markdown
+# and prose wrappers). '_' and '!' can appear inside URLs, so they are only rejected
+# as the final character.
+URL_PATTERN = r'https?://[^\s()<>*\[\]"“”‘’]+[^\s()<>.,:;\'"\?!*_\[\]“”‘’]'
 
 # The prompt tells the agent to put feed/fetch problems after this line.
 # Everything after it describes the run, not the news, so it needs no citation.
 FETCH_NOTES_MARKER = "FETCH NOTES:"
 EMPTY_SECTION_PLACEHOLDER = "Nothing to report from the fetched articles."
+
+# The marker only counts at the start of its own line (Markdown wrappers allowed).
+FETCH_NOTES_LINE = re.compile(rf'^[#*_ \t]*{re.escape(FETCH_NOTES_MARKER)}', re.MULTILINE)
+# A Markdown heading, or a line that is entirely bold.
+SECTION_HEADING_LINE = re.compile(r'^[ \t]*(#{1,6}[ \t]|\*\*[^*\n]+\*\*:?[ \t]*$)', re.MULTILINE)
 
 def normalize_url(url: str) -> str:
     """
@@ -76,11 +82,28 @@ def check_cited_were_fetched(cited: list[str], fetched: dict[str, str]) -> tuple
             
     return verified, unverified
 
+def strip_fetch_notes(briefing: str) -> str:
+    """
+    Removes the fetch notes from the briefing, but only if they are its last section.
+    If a new section starts after the marker, nothing is removed.
+    Args:
+        briefing: The text briefing content.
+    Returns:
+        The briefing text that must follow the citation rules.
+    """
+    markers = list(FETCH_NOTES_LINE.finditer(briefing))
+    if not markers:
+        return briefing
+    last_marker = markers[-1]
+    if SECTION_HEADING_LINE.search(briefing, last_marker.end()):
+        return briefing
+    return briefing[:last_marker.start()]
+
 def check_uncited_items(briefing: str) -> list[str]:
     """
     Groups briefing items across line continuations and flags any list item
     that lacks a valid URL citation and is not an expected empty-section placeholder.
-    Text after FETCH_NOTES_MARKER is ignored.
+    A final FETCH_NOTES_MARKER section is ignored (see strip_fetch_notes).
 
     Args:
         briefing: The text briefing content to validate.
@@ -95,7 +118,7 @@ def check_uncited_items(briefing: str) -> list[str]:
             items.append(" ".join(current_item))
             current_item.clear()
 
-    lines = briefing.split(FETCH_NOTES_MARKER)[0].splitlines()
+    lines = strip_fetch_notes(briefing).splitlines()
     for line in lines:
         stripped = line.strip()
         
@@ -119,23 +142,23 @@ def check_uncited_items(briefing: str) -> list[str]:
     flagged_items = []
 
     # Standard placeholder variants
-    allowed_placeholders = [
+    allowed_placeholders = {
         EMPTY_SECTION_PLACEHOLDER.lower().rstrip("."),
         "nothing significant",
+        "nothing significant to report",
         "no developments",
         "nothing to report",
         "no significant developments"
-    ]
+    }
 
     for item in items:
         # Check if the combined item context contains a valid URL
         if not re.search(URL_PATTERN, item):
-            item_lower = item.lower()
-            
-            # Verify if this matches any of our allowed empty-section strings
-            is_placeholder = any(phrase in item_lower for phrase in allowed_placeholders) and len(item_lower.split()) < 15
-            
-            if not is_placeholder:
+            # The whole item, minus its bullet and Markdown wrappers, must be an allowed phrase
+            item_text = re.sub(r'^([-*•]|\d+\.)\s+', '', item).lower()
+            item_text = item_text.strip(' *_"“”.')
+
+            if item_text not in allowed_placeholders:
                 flagged_items.append(item)
 
     return flagged_items
@@ -235,7 +258,7 @@ def check_grounding(item: str, article_text: str) -> list[str]:
             
     return flagged_entities
 
-DEFAULT_ALLOWED_DOMAINS = ("bbc.co.uk", "bbci.co.uk", "bbc.com", "thehindu.com", "google.com")
+DEFAULT_ALLOWED_DOMAINS = ("bbc.co.uk", "bbci.co.uk", "bbc.com", "thehindu.com", "news.google.com")
 
 def run_evals(briefing: str, fetched: dict[str, str], headline_meta: dict[str, str], report_path: str | None = "eval_report.json", allowed_domains: Sequence[str] = DEFAULT_ALLOWED_DOMAINS, now: datetime | None = None) -> dict:
     """
@@ -257,8 +280,8 @@ def run_evals(briefing: str, fetched: dict[str, str], headline_meta: dict[str, s
     stale, unknown_date = check_freshness(cited_urls, headline_meta, now=now)
     off_list = check_allowed_sources(cited_urls, allowed_domains)
     
-    # Strict validation rule
-    passed = len(unverified) == 0 and len(uncited_items) == 0
+    # Strict validation rule: a briefing with nothing verified has proved nothing
+    passed = len(verified) > 0 and not unverified and not uncited_items
     
     report = {
         "verified_count": len(verified),
@@ -277,7 +300,7 @@ def run_evals(briefing: str, fetched: dict[str, str], headline_meta: dict[str, s
         
     # Print a short summary summary table/log
     print("\n" + "="*40 + " EVALUATION REPORT " + "="*40)
-    print(f"Status: {'[PASSED] ✅' if passed else '[FAILED] ❌'}")
+    print(f"Status: {'[PASSED]' if passed else '[FAILED]'}")
     print(f"Verified Citations: {len(verified)}")
     print(f"Cited but not read: {len(unverified)}")
     print(f"Uncited Bullet Items Found: {len(uncited_items)}")

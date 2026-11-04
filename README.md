@@ -55,7 +55,8 @@ geopolitical-briefing-agent/
 ├── .gitignore
 ├── LICENSE                      # MIT
 ├── tests/
-│   └── test_evals.py            # Unit tests for evals.py
+│   ├── test_evals.py            # Unit tests for evals.py
+│   └── test_agent_main.py       # Unit tests for the exit code of main()
 ├── .github/
 │   ├── workflows/ci.yml         # CI: pytest + Claude Code project evaluation
 │   └── claude/review-prompt.md  # Instructions given to Claude in CI
@@ -131,7 +132,7 @@ The system prompt asks for this format:
 | `extract_citations(briefing)` | Finds every URL in the briefing, including Markdown links and URLs wrapped in brackets or followed by punctuation. | Sorted, de-duplicated list of normalised URLs |
 | `check_cited_were_fetched(cited, fetched)` | Detects **hallucinated citations**, meaning URLs that were cited but never fetched. | `(verified, unverified)` |
 | `is_allowed_domain(url, allowed_domains)` | Shared allowlist rule used by the tools and the eval: `http`/`https` only, a real hostname, and host equal to an allowed domain or a subdomain of it (so `evilbbc.com` and `bbc.com@evil.com` are refused). | `bool` |
-| `check_uncited_items(briefing)` | Ignores everything after `FETCH NOTES:`, groups bullet and numbered items with their continuation lines, and flags any item without a URL. Short empty-section placeholders are allowed. | List of flagged items |
+| `check_uncited_items(briefing)` | Ignores a final `FETCH NOTES:` section, groups bullet and numbered items with their continuation lines, and flags any item without a URL. The notes are only ignored if the marker starts its own line and no new section follows it. An item is accepted as an empty-section placeholder only if the whole item is an allowed phrase. | List of flagged items |
 | `check_freshness(cited, headline_meta, max_hours=72, now=None)` | Flags stories older than `max_hours`, using RFC 2822 feed dates. | `(stale, unknown_date)` |
 | `check_allowed_sources(cited, allowed_domains)` | Flags citations whose domain, or parent domain, is not on the allow-list. | List of off-list URLs |
 | `check_grounding(item, article_text)` | A lightweight hallucination heuristic: numbers and capitalised words in an item must appear in the source article. | List of missing entities |
@@ -139,12 +140,15 @@ The system prompt asks for this format:
 
 ### Pass/Fail Criteria
 
-A briefing **passes** only if both of these are true:
+A briefing **passes** only if all of these are true:
 
+- at least one citation was verified (`verified_count` is above 0), so an empty, prose-only or refused briefing fails,
 - every cited URL was actually fetched (`unverified` is empty), **and**
 - every bullet item carries a citation (`uncited_items` is empty).
 
 Stale stories, unknown dates and off-list domains are reported as **warnings**. They do not make the briefing fail.
+
+When the eval fails, the agent script exits with code 1.
 
 ### Sample Report (`eval_report.json`)
 
@@ -318,7 +322,7 @@ report = run_evals(
     fetched=fetched_articles,          # {url: text}
     headline_meta=headline_dates,      # {url: "Mon, 02 Nov 2026 10:00:00 GMT"}
     report_path="eval_report.json",    # pass None to skip writing the file
-    allowed_domains=("bbc.co.uk", "bbci.co.uk", "bbc.com", "thehindu.com", "google.com"),
+    allowed_domains=("bbc.co.uk", "bbci.co.uk", "bbc.com", "thehindu.com", "news.google.com"),
 )
 
 if not report["passed"]:
@@ -336,7 +340,7 @@ The first live runs failed, and each failure was a real finding. Every fix lande
 | Run | Eval result | Cause | Fix |
 |-----|-------------|-------|-----|
 | 1 | **FAIL**: 0 verified, 5 cited-but-not-read, 5 unknown dates | The briefing wrapped URLs in Markdown italics (`*Source: …*`), and the URL regex captured the trailing `*`, so no citation matched. The BBC feed was also refused: its host `feeds.bbci.co.uk` wasn't allowlisted. | Excluded `*` from URL matches; added `bbci.co.uk` |
-| 2 | **FAIL**: 2 uncited bullets | Bullets describing fetch problems were read as uncited news claims. | `FETCH NOTES:` marker: the prompt puts run notes after it, and the eval ignores everything after it |
+| 2 | **FAIL**: 2 uncited bullets | Bullets describing fetch problems were read as uncited news claims. | `FETCH NOTES:` marker: the prompt puts run notes in a final section after it, and the eval ignores that section |
 | 3 | **FAIL**: 1 uncited bullet | The model added a "the articles don't cover…" bullet. | Fixed empty-section phrase shared by prompt and eval; prompt forbids "what wasn't covered" bullets |
 | 4 | **PASS**: 3 verified, 0 issues | | |
 
@@ -359,10 +363,12 @@ The first live runs failed, and each failure was a real finding. Every fix lande
 ## Known Limitations
 
 - **Citations are checked for provenance, not accuracy.** The evals prove that every cited URL points to an article the agent actually fetched. They do not prove that the claim next to the citation is supported by that article. A bullet can cite a real, fetched article and still misstate what it says, and no check in `run_evals` would catch it.
+- **Only list items are checked for citations.** Once one citation is verified, an uncited prose paragraph elsewhere in the briefing still passes, because the check can't tell a claim from an intro line. The prompt requires every item to be a bullet, but the eval doesn't enforce it.
+- **Bullets inside the final `FETCH NOTES:` section are not checked.** A news claim placed there under no new heading still passes, unless it cites a URL that wasn't fetched.
 - **India-focused.** The prompt and the Google News feed are set up for India; briefings for other countries would need the prompt and feed query changed.
 - **The 5-article cap has a race.** Tool calls from a single model turn run in parallel, so if the model requests six fetches at once, all six can pass the `len(fetched) >= 5` check before any is recorded. A lock around check-and-reserve would close it.
 - **`check_grounding` is a heuristic.** It matches surface tokens (numbers and capitalised words), so paraphrases or differences in number formatting can produce false positives. It is also not called by `run_evals`.
-- **Google News links are redirects.** Google News RSS items point to `news.google.com` URLs rather than to the publisher, which is why `google.com` is on the default allow-list. `trafilatura` usually can't follow these redirects, so `fetch_article` typically returns `FETCH_FAILED` for Google News items. Because the agent only reports stories it fetched, the Google News feed rarely contributes to the briefing.
+- **Google News links are redirects.** Google News RSS items point to `news.google.com` URLs rather than to the publisher, which is why `news.google.com` is on the default allow-list. `trafilatura` usually can't follow these redirects, so `fetch_article` typically returns `FETCH_FAILED` for Google News items. Because the agent only reports stories it fetched, the Google News feed rarely contributes to the briefing.
 - **Freshness depends on feed metadata.** Stories without a parseable `Published` date are reported as `unknown_date`, not as stale.
 - **Dependencies are not pinned.** `requirements.txt` lists package names only.
 

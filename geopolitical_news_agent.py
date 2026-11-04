@@ -1,4 +1,5 @@
 import re
+import sys
 import feedparser
 from trafilatura import fetch_url, extract
 from langchain.tools import tool
@@ -37,12 +38,13 @@ SYSTEMPROMPT = f"""
                     Only report stories you fetched successfully. Do not include headline-only items, and do not
                     mention stories whose article you could not fetch.
                     Output: 3–5 key developments, then a section on developments affecting India.
+                    Write every item as a bullet starting with "- " that includes its exact source URL. Do not write items as paragraphs.
                     If a section has nothing to report, write exactly: "{EMPTY_SECTION_PLACEHOLDER}"
                     Don't add bullets about what the articles don't cover. Don't repeat an item across sections.
                     If a fetch fails, skip that story. Don’t retry it more than once.
                     When reporting feed or fetch issues, name the source (e.g. "BBC feed") without pasting its URL.
                     End with a line {FETCH_NOTES_MARKER} followed by any feed or fetch problems (or "none").
-                    Put nothing about feed or fetch problems before that line.
+                    This must be the last section. Put nothing about feed or fetch problems before that line, and no news items after it.
                     """
 
 headline_meta: dict[str, str] = {}
@@ -217,7 +219,9 @@ def main():
     print("--- RAW BRIEFING TEXT EXTRACTED ---")
     print(briefing_text)
     print("-----------------------------------")
-    run_evals(briefing_text, fetched, headline_meta)
+    report = run_evals(briefing_text, fetched, headline_meta)
+    if not report["passed"]:
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

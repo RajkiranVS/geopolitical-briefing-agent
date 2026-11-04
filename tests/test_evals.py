@@ -6,11 +6,13 @@ import email.utils
 from datetime import datetime, timedelta, timezone
 
 from evals import (
+    DEFAULT_ALLOWED_DOMAINS,
     EMPTY_SECTION_PLACEHOLDER,
     check_cited_were_fetched,
     check_freshness,
     check_uncited_items,
     extract_citations,
+    is_allowed_domain,
     run_evals,
 )
 
@@ -58,6 +60,29 @@ def test_underscore_inside_url_kept_trailing_stripped():
 def test_lowercases_domain_keeps_path_case():
     briefing = "Source: https://WWW.BBC.CO.UK/News/World-Asia-123"
     assert extract_citations(briefing) == ["https://www.bbc.co.uk/News/World-Asia-123"]
+
+def test_trailing_bracket_not_captured():
+    briefing = "[Source: https://www.bbc.com/news/world-123]"
+    assert extract_citations(briefing) == ["https://www.bbc.com/news/world-123"]
+
+def test_trailing_exclamation_not_captured():
+    briefing = "Read it at https://www.bbc.com/news/world-123!"
+    assert extract_citations(briefing) == ["https://www.bbc.com/news/world-123"]
+
+def test_curly_quotes_not_captured():
+    briefing = "“https://www.bbc.com/news/world-123” and ‘https://www.bbc.com/news/world-456’"
+    assert extract_citations(briefing) == [
+        "https://www.bbc.com/news/world-123",
+        "https://www.bbc.com/news/world-456",
+    ]
+
+def test_url_as_markdown_link_text_is_one_citation():
+    briefing = "[https://www.bbc.com/news/world-123](https://www.bbc.com/news/world-123)"
+    assert extract_citations(briefing) == ["https://www.bbc.com/news/world-123"]
+
+def test_stacked_trailing_punctuation_not_captured():
+    briefing = "(see [BBC: https://www.bbc.com/news/world-123]!)."
+    assert extract_citations(briefing) == ["https://www.bbc.com/news/world-123"]
 
 
 # check_cited_were_fetched
@@ -124,6 +149,67 @@ def test_uncited_bullet_before_fetch_notes_flagged():
     )
     assert check_uncited_items(briefing) == ["- Ministers agreed a new sanctions package."]
 
+def test_claim_containing_placeholder_phrase_flagged():
+    # Regression: the placeholder match was a substring, so this short claim passed.
+    item = "- Iran seized a tanker; no developments elsewhere."
+    assert check_uncited_items(f"## Middle East\n{item}\n") == [item]
+
+def test_wrapped_placeholder_passes():
+    assert check_uncited_items(f'## India\n- **"{EMPTY_SECTION_PLACEHOLDER}"**\n') == []
+
+def test_new_section_after_fetch_notes_is_checked():
+    # Regression: everything after the marker was ignored, wherever it appeared.
+    briefing = (
+        "FETCH NOTES: none\n"
+        "\n"
+        "## Asia\n"
+        "- Ministers agreed a new sanctions package.\n"
+    )
+    assert check_uncited_items(briefing) == ["- Ministers agreed a new sanctions package."]
+
+def test_bold_section_after_fetch_notes_is_checked():
+    briefing = (
+        "FETCH NOTES: none\n"
+        "\n"
+        "**Asia**\n"
+        "- Ministers agreed a new sanctions package.\n"
+    )
+    assert check_uncited_items(briefing) == ["- Ministers agreed a new sanctions package."]
+
+def test_marker_inside_item_is_not_accepted():
+    item = "- Ministers met. FETCH NOTES: they agreed a new sanctions package."
+    assert check_uncited_items(f"## Asia\n{item}\n") == [item]
+
+def test_claim_between_two_markers_flagged():
+    briefing = (
+        "FETCH NOTES:\n"
+        "- Ministers agreed a new sanctions package.\n"
+        "\n"
+        "FETCH NOTES: none\n"
+    )
+    assert check_uncited_items(briefing) == ["- Ministers agreed a new sanctions package."]
+
+def test_bold_fetch_notes_marker_accepted():
+    briefing = (
+        "## Asia\n"
+        "- Leaders met in Delhi. Source: https://www.thehindu.com/news/article1.ece\n"
+        "\n"
+        "**FETCH NOTES:** none\n"
+        "- The BBC feed returned no entries.\n"
+    )
+    assert check_uncited_items(briefing) == []
+
+
+# is_allowed_domain
+
+def test_google_news_is_allowed():
+    assert is_allowed_domain("https://news.google.com/rss/articles/abc", DEFAULT_ALLOWED_DOMAINS)
+
+def test_other_google_hosts_are_refused():
+    # Regression: allowing google.com also allowed hosts that serve any content.
+    for url in ("https://sites.google.com/view/x", "https://translate.google.com/x", "https://google.com/x"):
+        assert not is_allowed_domain(url, DEFAULT_ALLOWED_DOMAINS)
+
 
 # check_freshness
 
@@ -172,3 +258,38 @@ def test_custom_allowed_domains():
     url, briefing, fetched, headline_meta = clean_inputs()
     report = run_evals(briefing, fetched, headline_meta, report_path=None, allowed_domains=["reuters.com"], now=NOW)
     assert report["off_list"] == [url]
+
+def test_report_output_is_ascii(capsys):
+    # Regression: emoji in the status line crashed piped output on Windows (cp1252).
+    _, briefing, fetched, headline_meta = clean_inputs()
+    run_evals(briefing, fetched, headline_meta, report_path=None, now=NOW)
+    assert capsys.readouterr().out.isascii()
+
+def test_empty_briefing_fails():
+    # Regression: with nothing to check, every check came back clean.
+    report = run_evals("", {}, {}, report_path=None, now=NOW)
+    assert report["passed"] is False
+    assert report["verified_count"] == 0
+
+def test_prose_only_briefing_fails():
+    briefing = "Ministers agreed a new sanctions package, officials said on Monday."
+    report = run_evals(briefing, {}, {}, report_path=None, now=NOW)
+    assert report["passed"] is False
+
+def test_refusal_fails_even_with_fetched_articles():
+    _, _, fetched, headline_meta = clean_inputs()
+    report = run_evals("I can't produce a briefing today.", fetched, headline_meta, report_path=None, now=NOW)
+    assert report["passed"] is False
+
+def test_all_empty_sections_fails():
+    briefing = f"## Key developments\n- {EMPTY_SECTION_PLACEHOLDER}\n\n## India\n- {EMPTY_SECTION_PLACEHOLDER}\n"
+    report = run_evals(briefing, {}, {}, report_path=None, now=NOW)
+    assert report["uncited_items"] == []
+    assert report["passed"] is False
+
+def test_unverified_citation_fails_alongside_verified_one():
+    _, briefing, fetched, headline_meta = clean_inputs()
+    briefing += "- Talks collapsed. (Source: https://www.bbc.com/news/not-fetched)\n"
+    report = run_evals(briefing, fetched, headline_meta, report_path=None, now=NOW)
+    assert report["verified_count"] == 1
+    assert report["passed"] is False
