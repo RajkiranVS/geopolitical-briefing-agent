@@ -45,6 +45,7 @@ SYSTEMPROMPT = f"""
                     When reporting feed or fetch issues, name the source (e.g. "BBC feed") without pasting its URL.
                     End with a line {FETCH_NOTES_MARKER} followed by any feed or fetch problems (or "none").
                     This must be the last section. Put nothing about feed or fetch problems before that line, and no news items after it.
+                    Under that line, use only plain bullets that name the feed or fetch problem, with no sub-headings.
                     """
 
 headline_meta: dict[str, str] = {}

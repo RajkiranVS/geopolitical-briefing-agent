@@ -199,6 +199,43 @@ def test_bold_fetch_notes_marker_accepted():
     )
     assert check_uncited_items(briefing) == []
 
+def test_lowercase_fetch_notes_marker_accepted():
+    briefing = (
+        "## Asia\n"
+        "- Leaders met in Delhi. Source: https://www.thehindu.com/news/article1.ece\n"
+        "\n"
+        "Fetch notes:\n"
+        "- The BBC feed returned no entries.\n"
+    )
+    assert check_uncited_items(briefing) == []
+
+def test_sub_heading_inside_fetch_notes_accepted():
+    # Regression: any heading after the marker made a correct briefing fail.
+    for heading in ("**Feed issues:**", "### Feed issues"):
+        briefing = (
+            "FETCH NOTES:\n"
+            f"{heading}\n"
+            "- The BBC feed returned no entries.\n"
+            "- The Google News article could not be fetched.\n"
+        )
+        assert check_uncited_items(briefing) == []
+
+def test_sub_heading_with_none_inside_fetch_notes_accepted():
+    assert check_uncited_items("FETCH NOTES:\n**Feed issues:**\n- None.\n") == []
+
+def test_news_claim_beside_fetch_problem_under_heading_flagged():
+    briefing = (
+        "FETCH NOTES:\n"
+        "- The BBC feed returned no entries.\n"
+        "\n"
+        "## Asia\n"
+        "- Ministers agreed a new sanctions package.\n"
+    )
+    assert check_uncited_items(briefing) == [
+        "- The BBC feed returned no entries.",
+        "- Ministers agreed a new sanctions package.",
+    ]
+
 
 # is_allowed_domain
 

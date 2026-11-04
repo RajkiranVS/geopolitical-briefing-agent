@@ -20,10 +20,13 @@ URL_PATTERN = r'https?://[^\s()<>*\[\]"“”‘’]+[^\s()<>.,:;\'"\?!*_\[\]“
 FETCH_NOTES_MARKER = "FETCH NOTES:"
 EMPTY_SECTION_PLACEHOLDER = "Nothing to report from the fetched articles."
 
-# The marker only counts at the start of its own line (Markdown wrappers allowed).
-FETCH_NOTES_LINE = re.compile(rf'^[#*_ \t]*{re.escape(FETCH_NOTES_MARKER)}', re.MULTILINE)
+# The marker only counts at the start of its own line (Markdown wrappers allowed, any case).
+FETCH_NOTES_LINE = re.compile(rf'^[#*_ \t]*{re.escape(FETCH_NOTES_MARKER)}', re.MULTILINE | re.IGNORECASE)
 # A Markdown heading, or a line that is entirely bold.
 SECTION_HEADING_LINE = re.compile(r'^[ \t]*(#{1,6}[ \t]|\*\*[^*\n]+\*\*:?[ \t]*$)', re.MULTILINE)
+LIST_ITEM_START = re.compile(r'^([-*•]|\d+\.)\s+')
+# The prompt tells the agent to name the failing source, e.g. "BBC feed".
+FETCH_PROBLEM_WORDS = re.compile(r'\b(feeds?|fetch|fetched|fetches|fetching)\b', re.IGNORECASE)
 
 def normalize_url(url: str) -> str:
     """
@@ -82,10 +85,28 @@ def check_cited_were_fetched(cited: list[str], fetched: dict[str, str]) -> tuple
             
     return verified, unverified
 
+def only_describes_fetch_problems(notes: str) -> bool:
+    """
+    Checks that every list item in the notes names a feed or fetch problem, or is "none".
+    Args:
+        notes: The text after the fetch notes marker.
+    Returns:
+        True if no list item looks like a news claim.
+    """
+    for line in notes.splitlines():
+        stripped = line.strip()
+        if not LIST_ITEM_START.match(stripped):
+            continue
+        item_text = LIST_ITEM_START.sub('', stripped).strip(' *_.').lower()
+        if item_text != "none" and not FETCH_PROBLEM_WORDS.search(item_text):
+            return False
+    return True
+
 def strip_fetch_notes(briefing: str) -> str:
     """
     Removes the fetch notes from the briefing, but only if they are its last section.
-    If a new section starts after the marker, nothing is removed.
+    A heading after the marker starts a new section, and nothing is removed, unless
+    every list item after the marker describes a feed or fetch problem.
     Args:
         briefing: The text briefing content.
     Returns:
@@ -95,7 +116,8 @@ def strip_fetch_notes(briefing: str) -> str:
     if not markers:
         return briefing
     last_marker = markers[-1]
-    if SECTION_HEADING_LINE.search(briefing, last_marker.end()):
+    notes = briefing[last_marker.end():]
+    if SECTION_HEADING_LINE.search(briefing, last_marker.end()) and not only_describes_fetch_problems(notes):
         return briefing
     return briefing[:last_marker.start()]
 
@@ -123,7 +145,7 @@ def check_uncited_items(briefing: str) -> list[str]:
         stripped = line.strip()
         
         # 1. Check for bullet or numbered list indicators
-        if re.match(r'^([-*•]|\d+\.)\s+', stripped):
+        if LIST_ITEM_START.match(stripped):
             save_current()
             current_item.append(stripped)
             
@@ -155,7 +177,7 @@ def check_uncited_items(briefing: str) -> list[str]:
         # Check if the combined item context contains a valid URL
         if not re.search(URL_PATTERN, item):
             # The whole item, minus its bullet and Markdown wrappers, must be an allowed phrase
-            item_text = re.sub(r'^([-*•]|\d+\.)\s+', '', item).lower()
+            item_text = LIST_ITEM_START.sub('', item).lower()
             item_text = item_text.strip(' *_"“”.')
 
             if item_text not in allowed_placeholders:
