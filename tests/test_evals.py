@@ -242,6 +242,38 @@ def test_news_claim_beside_fetch_problem_under_heading_flagged():
 def test_google_news_is_allowed():
     assert is_allowed_domain("https://news.google.com/rss/articles/abc", DEFAULT_ALLOWED_DOMAINS)
 
+def test_urls_that_clients_parse_differently_are_refused():
+    # Regression: urlsplit reads these hosts as bbc.com, but urllib3 connected to collector.example.
+    for url in (
+        "https://collector.example\\@bbc.com/a",
+        "https://collector.example\t@bbc.com/a",
+        "https://collector.example\n@bbc.com/a",
+        "https://collector.example%5c@bbc.com/a",
+        "https://user:password@bbc.com/a",
+        "https://www.bbc.com/news\\a",
+    ):
+        assert not is_allowed_domain(url, DEFAULT_ALLOWED_DOMAINS), url
+
+def test_malformed_urls_are_refused_not_raised():
+    # Regression: urlsplit raises ValueError on these, which crashed the run.
+    for url in ("http://[::1", "http://[bad", "http://127.0.0.1／@bbc.com/a"):
+        assert not is_allowed_domain(url, DEFAULT_ALLOWED_DOMAINS), url
+
+def test_malformed_citation_is_unverified_not_raised():
+    briefing = "- Talks resumed. http://127.0.0.1／@bbc.com/a"
+    report = run_evals(briefing, {}, {}, report_path=None, now=NOW)
+    assert report["passed"] is False
+    assert report["unverified"] == ["http://127.0.0.1／@bbc.com/a"]
+
+def test_normal_urls_are_still_allowed():
+    for url in (
+        "https://www.bbc.com/news/articles/abc?at_medium=RSS",
+        "https://www.thehindu.com/news/international/article123.ece",
+        "https://feeds.bbci.co.uk/news/world/rss.xml",
+        "https://news.google.com/rss/search?q=India+foreign+affairs&hl=en-IN&gl=IN&ceid=IN:en",
+    ):
+        assert is_allowed_domain(url, DEFAULT_ALLOWED_DOMAINS), url
+
 def test_other_google_hosts_are_refused():
     # Regression: allowing google.com also allowed hosts that serve any content.
     for url in ("https://sites.google.com/view/x", "https://translate.google.com/x", "https://google.com/x"):

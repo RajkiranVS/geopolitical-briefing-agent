@@ -1,7 +1,9 @@
 import re
 import sys
 import feedparser
-from trafilatura import fetch_url, extract
+from trafilatura import extract
+from trafilatura.downloads import fetch_response
+from trafilatura.settings import use_config
 from langchain.tools import tool
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import BaseMessage
@@ -14,6 +16,17 @@ from evals import is_allowed_domain, normalize_url, run_evals, DEFAULT_ALLOWED_D
 
 model = init_chat_model(model="claude-haiku-5-5")
 
+# get_headlines only accepts these exact URLs.
+ALLOWED_FEEDS = (
+    "https://feeds.bbci.co.uk/news/world/rss.xml",
+    "https://www.thehindu.com/news/international/feeder/default.rss",
+    "https://news.google.com/rss/search?q=India+foreign+affairs&hl=en-IN&gl=IN&ceid=IN:en",
+)
+
+# By default trafilatura retries without certificate checks after an SSL error.
+FETCH_CONFIG = use_config()
+FETCH_CONFIG.set("DEFAULT", "INSECURE_SSL_FALLBACK", "off")
+
 SYSTEMPROMPT = f"""
                     You are an expert geopolitical news agent.
                     Your task is to analyze the provided news headlines and articles, and summarise only what the fetched articles say,
@@ -22,9 +35,9 @@ SYSTEMPROMPT = f"""
                     First use the get_headlines tool to fetch the latest headlines from a news feed url below
                     
                     URLs:
-                    - http://feeds.bbci.co.uk/news/world/rss.xml
-                    - https://www.thehindu.com/news/international/feeder/default.rss
-                    - https://news.google.com/rss/search?q=India+foreign+affairs&hl=en-IN&gl=IN&ceid=IN:en
+                    - {ALLOWED_FEEDS[0]}
+                    - {ALLOWED_FEEDS[1]}
+                    - {ALLOWED_FEEDS[2]}
 
                     STRICTLY use only the provided urls to fetch headlines. Do not use any other sources.
 
@@ -76,10 +89,14 @@ def get_headlines(feed_url: str) -> str:
         ...
         '''
     """
-    if not is_allowed_domain(feed_url, DEFAULT_ALLOWED_DOMAINS):
-        return f"FETCH_FAILED: {feed_url} is not an allowed domain."
-    
+    if feed_url not in ALLOWED_FEEDS:
+        return f"FETCH_FAILED: {feed_url} is not an allowed feed."
+
     feed = feedparser.parse(feed_url)
+    # feedparser follows redirects, so check where the feed really came from
+    if not is_allowed_domain(feed.get("href") or feed_url, DEFAULT_ALLOWED_DOMAINS):
+        return f"FETCH_FAILED: {feed_url} redirected to a host that is not allowed."
+
     headlines = []
     limit = 15
 
@@ -117,11 +134,15 @@ def fetch_article(url: str) -> str:
     if len(fetched) >= 5:
         return "FETCH_LIMIT_REACHED: 5 articles already fetched. Write the briefing now using those."
     
-    downloaded = fetch_url(url)
-    if not downloaded:
+    response = fetch_response(url, decode=True, config=FETCH_CONFIG)
+    if not response or response.status != 200 or not response.html:
         return f"FETCH_FAILED: {url}"
-    
-    article_text = extract(downloaded)
+
+    # Redirects are followed, so check where the content really came from
+    if not is_allowed_domain(response.url, DEFAULT_ALLOWED_DOMAINS):
+        return f"FETCH_FAILED: {url} redirected to a host that is not allowed."
+
+    article_text = extract(response.html)
     if not article_text:
         return f"FETCH_FAILED: {url}"
 

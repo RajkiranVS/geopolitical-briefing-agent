@@ -35,7 +35,7 @@ The agent reads live RSS feeds, fetches the full text of selected articles and w
 
 - **Agentic tool use**: the model decides which feeds to read and which articles to open, using two tools: `get_headlines` and `fetch_article`.
 - **Grounded output**: the system prompt tells the model to summarise only what the fetched articles say, attribute every claim, and cite the exact article link.
-- **Domain allowlist enforced in the tools**: both tools refuse any URL whose scheme isn't `http`/`https` or whose host isn't on the allowlist, *before* making a network call. The same `is_allowed_domain` function is used by the tools and by the eval, so the guardrail and the check can never disagree.
+- **Source restrictions enforced in the tools**: `get_headlines` only accepts the exact feed URLs in `ALLOWED_FEEDS`. `fetch_article` refuses any URL whose scheme isn't `http`/`https` or whose host isn't on the allowlist, *before* making a network call. Both tools discard content that was redirected to a host off the allowlist. The same `is_allowed_domain` function is used by the tools and by the eval, so the guardrail and the check can never disagree.
 - **Bounded execution, enforced in code**: `fetch_article` refuses after 5 articles (not just a prompt instruction), and the agent stops after 15 tool-calling rounds.
 - **Runtime evals on every run**: `main()` calls `run_evals()` after the agent finishes. Deterministic checks verify that citations were actually fetched, that every bullet is cited, that stories are recent, and that sources come from allowed domains. The results are printed and written to a JSON report.
 - **Prompt–eval contracts**: fixed strings shared by the prompt and the eval (`FETCH NOTES:` and the empty-section placeholder) keep run notes and "nothing to report" lines from being misread as uncited claims.
@@ -100,14 +100,14 @@ The agent is built with the LangGraph **Functional API** (`@entrypoint` and `@ta
 
 | Tool | Purpose | Behaviour |
 |------|---------|-----------|
-| `get_headlines(feed_url)` | Discover stories | Refuses non-allowlisted URLs before fetching. Parses the RSS feed with `feedparser` and returns up to **15** numbered items (title, published date, link, summary). Records each `link → published` date in `headline_meta` (normalised URL as key) for the freshness check. Returns `FETCH_FAILED: <url>` if the feed is empty. |
-| `fetch_article(url)` | Read a story | Refuses non-allowlisted URLs, then refuses once **5** articles have been fetched (`FETCH_LIMIT_REACHED`). Otherwise downloads and extracts the article body with `trafilatura`, truncates it at a `Published -` footer if present, caps it at **4,000 characters**, records exactly that text in `fetched` and returns it with `Source: <url>`. Failed fetches return `FETCH_FAILED: <url>` and don't count toward the limit. |
+| `get_headlines(feed_url)` | Discover stories | Refuses anything except the exact URLs in `ALLOWED_FEEDS` before fetching, and discards a feed that redirected off the allowlist. Parses the RSS feed with `feedparser` and returns up to **15** numbered items (title, published date, link, summary). Records each `link → published` date in `headline_meta` (normalised URL as key) for the freshness check. Returns `FETCH_FAILED: <url>` if the feed is empty. |
+| `fetch_article(url)` | Read a story | Refuses non-allowlisted URLs, then refuses once **5** articles have been fetched (`FETCH_LIMIT_REACHED`). Otherwise downloads the page with `trafilatura`, with certificate checks always on and its protection against private addresses. It discards a page that redirected off the allowlist, then extracts the article body, truncates it at a `Published -` footer if present, caps it at **4,000 characters**, records exactly that text in `fetched` and returns it with `Source: <url>`. Failed fetches return `FETCH_FAILED: <url>` and don't count toward the limit. |
 
 ### News Sources
 
 | Source | Feed URL |
 |--------|----------|
-| BBC News – World | `http://feeds.bbci.co.uk/news/world/rss.xml` |
+| BBC News – World | `https://feeds.bbci.co.uk/news/world/rss.xml` |
 | The Hindu – International | `https://www.thehindu.com/news/international/feeder/default.rss` |
 | Google News – India foreign affairs | `https://news.google.com/rss/search?q=India+foreign+affairs&hl=en-IN&gl=IN&ceid=IN:en` |
 
@@ -131,7 +131,7 @@ The system prompt asks for this format:
 | `normalize_url(url)` | Lowercases the scheme and host, and strips the query string, fragment and trailing slash, so that the same article always compares equal. | Normalised URL |
 | `extract_citations(briefing)` | Finds every URL in the briefing, including Markdown links and URLs wrapped in brackets or followed by punctuation. | Sorted, de-duplicated list of normalised URLs |
 | `check_cited_were_fetched(cited, fetched)` | Detects **hallucinated citations**, meaning URLs that were cited but never fetched. | `(verified, unverified)` |
-| `is_allowed_domain(url, allowed_domains)` | Shared allowlist rule used by the tools and the eval: `http`/`https` only, a real hostname, and host equal to an allowed domain or a subdomain of it (so `evilbbc.com` and `bbc.com@evil.com` are refused). | `bool` |
+| `is_allowed_domain(url, allowed_domains)` | Shared allowlist rule used by the tools and the eval: `http`/`https` only, a real hostname, and host equal to an allowed domain or a subdomain of it (so `evilbbc.com` is refused). URLs that are malformed or contain a username, backslash, whitespace or control character are refused too, because HTTP clients can read their host differently (`https://evil.example\@bbc.com` connects to `evil.example`). | `bool` |
 | `check_uncited_items(briefing)` | Ignores a final `FETCH NOTES:` section, groups bullet and numbered items with their continuation lines, and flags any item without a URL. The notes are only ignored if the marker starts its own line (in any case) and no new section follows it. A heading after the marker counts as a new section unless every list item after the marker names a feed or fetch problem or says "none". An item is accepted as an empty-section placeholder only if the whole item is an allowed phrase. | List of flagged items |
 | `check_freshness(cited, headline_meta, max_hours=72, now=None)` | Flags stories older than `max_hours`, using RFC 2822 feed dates. | `(stale, unknown_date)` |
 | `check_allowed_sources(cited, allowed_domains)` | Flags citations whose domain, or parent domain, is not on the allow-list. | List of off-list URLs |
@@ -349,7 +349,8 @@ The first live runs failed, and each failure was a real finding. Every fix lande
 | What to change | Where |
 |----------------|-------|
 | Model | `init_chat_model(model="claude-haiku-5-5")` in `geopolitical_news_agent.py` |
-| News feeds and briefing rules | The `SYSTEMPROMPT` string |
+| News feeds | `ALLOWED_FEEDS` in `geopolitical_news_agent.py` (the prompt reads the first three entries) |
+| Briefing rules | The `SYSTEMPROMPT` string |
 | Headlines per feed | `limit = 15` in `get_headlines` |
 | Article length sent to the model | `article_text[:4000]` in `fetch_article` |
 | Maximum agent rounds | `if rounds > 15` in `agent` |
@@ -368,6 +369,7 @@ The first live runs failed, and each failure was a real finding. Every fix lande
 - **India-focused.** The prompt and the Google News feed are set up for India; briefings for other countries would need the prompt and feed query changed.
 - **The 5-article cap has a race.** Tool calls from a single model turn run in parallel, so if the model requests six fetches at once, all six can pass the `len(fetched) >= 5` check before any is recorded. A lock around check-and-reserve would close it.
 - **`check_grounding` is a heuristic.** It matches surface tokens (numbers and capitalised words), so paraphrases or differences in number formatting can produce false positives. It is also not called by `run_evals`.
+- **Redirects are checked after they happen.** The tools discard content from a redirect off the allowlist, but the request to that host has already been made. For `fetch_article`, `trafilatura` blocks private addresses before connecting. `get_headlines` has no such protection, so it relies on only requesting the fixed feed URLs.
 - **Google News links are redirects.** Google News RSS items point to `news.google.com` URLs rather than to the publisher, which is why `news.google.com` is on the default allow-list. `trafilatura` usually can't follow these redirects, so `fetch_article` typically returns `FETCH_FAILED` for Google News items. Because the agent only reports stories it fetched, the Google News feed rarely contributes to the briefing.
 - **Freshness depends on feed metadata.** Stories without a parseable `Published` date are reported as `unknown_date`, not as stale.
 - **Dependencies are not pinned.** `requirements.txt` lists package names only.

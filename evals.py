@@ -19,6 +19,8 @@ URL_PATTERN = r'https?://[^\s()<>*\[\]"“”‘’]+[^\s()<>.,:;\'"\?!*_\[\]“
 # Everything after it describes the run, not the news, so it needs no citation.
 FETCH_NOTES_MARKER = "FETCH NOTES:"
 EMPTY_SECTION_PLACEHOLDER = "Nothing to report from the fetched articles."
+# Backslashes, whitespace and control characters are never valid in a URL we fetch.
+UNSAFE_URL_CHARS = re.compile(r'[\\\s\x00-\x1f\x7f]')
 
 # The marker only counts at the start of its own line (Markdown wrappers allowed, any case).
 FETCH_NOTES_LINE = re.compile(rf'^[#*_ \t]*{re.escape(FETCH_NOTES_MARKER)}', re.MULTILINE | re.IGNORECASE)
@@ -39,7 +41,11 @@ def normalize_url(url: str) -> str:
     if not url:
         return ""
     # Split scheme, netloc, path, query, fragment
-    split_url = urlsplit(url)
+    try:
+        split_url = urlsplit(url)
+    except ValueError:
+        # A malformed URL can't match a fetched one, so it is reported as unverified
+        return url
     # Reconstruct url without query and fragment
     normalized = f"{split_url.scheme.lower()}://{split_url.netloc.lower()}{split_url.path}"
     # Remove trailing slashes
@@ -232,8 +238,19 @@ def is_allowed_domain(url: str, allowed_domains: Sequence[str]) -> bool:
     Returns:
         True if the domain is allowed, False otherwise.
     """
-    split_url = urlsplit(url)
-    domain = split_url.hostname
+    # HTTP clients and urlsplit can disagree about the host of these URLs.
+    # 'https://evil.example\@bbc.com' parses as bbc.com here but connects to evil.example.
+    if UNSAFE_URL_CHARS.search(url):
+        return False
+
+    try:
+        split_url = urlsplit(url)
+        domain = split_url.hostname
+    except ValueError:
+        return False
+
+    if "@" in split_url.netloc:
+        return False
 
     schema = split_url.scheme.lower()
 

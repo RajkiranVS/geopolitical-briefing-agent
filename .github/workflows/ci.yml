@@ -58,14 +58,16 @@ jobs:
       contents: read
       pull-requests: write
     env:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       CLAUDE_MODEL: ${{ vars.CLAUDE_MODEL || 'claude-sonnet-5-5' }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      # Only the two steps that need the key receive it, so dependency installs can't read it.
       - name: Check API key is configured
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           if [ -z "$ANTHROPIC_API_KEY" ]; then
             echo "::error::ANTHROPIC_API_KEY secret is not set (Settings → Secrets and variables → Actions)."
@@ -105,6 +107,8 @@ jobs:
           fi
 
       - name: Run Claude evaluation
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           claude -p "$(cat claude-review/prompt.md)" \
             --model "$CLAUDE_MODEL" \
