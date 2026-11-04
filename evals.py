@@ -10,14 +10,51 @@ import email.utils
 from datetime import datetime, timezone
 
 #Global Patterns
-# '*' is never part of a URL (Markdown emphasis). '_' can appear inside URLs,
-# so it is only rejected as the final character.
-URL_PATTERN = r'https?://[^\s()<>*]+[^\s()<>.,:;\'"\?*_]'
+# '*', square brackets, and double or curly quotes are never part of a URL (Markdown
+# and prose wrappers). '_' and '!' can appear inside URLs, so they are only rejected
+# as the final character.
+URL_PATTERN = r'https?://[^\s()<>*\[\]"“”‘’]+[^\s()<>.,:;\'"\?!*_\[\]“”‘’]'
 
 # The prompt tells the agent to put feed/fetch problems after this line.
 # Everything after it describes the run, not the news, so it needs no citation.
 FETCH_NOTES_MARKER = "FETCH NOTES:"
 EMPTY_SECTION_PLACEHOLDER = "Nothing to report from the fetched articles."
+# Backslashes, whitespace and control characters are never valid in a URL we fetch.
+UNSAFE_URL_CHARS = re.compile(r'[\\\s\x00-\x1f\x7f]')
+
+# The marker only counts at the start of its own line (Markdown wrappers allowed, any case).
+FETCH_NOTES_LINE = re.compile(rf'^[#*_ \t]*{re.escape(FETCH_NOTES_MARKER)}', re.MULTILINE | re.IGNORECASE)
+# A Markdown heading, or a line that is entirely bold.
+SECTION_HEADING_LINE = re.compile(r'^[ \t]*(#{1,6}[ \t]|\*\*[^*\n]+\*\*:?[ \t]*$)', re.MULTILINE)
+LIST_ITEM_START = re.compile(r'^([-*•]|\d+\.)\s+')
+# The prompt tells the agent to name the failing source, e.g. "BBC feed".
+FETCH_PROBLEM_WORDS = re.compile(r'\b(feeds?|fetch|fetched|fetches|fetching)\b', re.IGNORECASE)
+
+# Text that addresses the reading model instead of a human reader. This is a first filter
+# and easy to reword around: the tool restrictions are what actually limit an attack.
+INJECTION_SIGNS = {
+    "override instruction": re.compile(r'\b(ignore|disregard|forget)\b[^.\n]{0,40}\b(instructions?|prompts?|rules)\b', re.IGNORECASE),
+    "system prompt request": re.compile(r'\bsystem prompt\b', re.IGNORECASE),
+    "addressed to AI readers": re.compile(r'\b(ai|automated|language)\s+(agents?|systems?|models?|assistants?|summari[sz]ers?|readers?)\b[^.\n]{0,20}:', re.IGNORECASE),
+    "fake authority label": re.compile(r'\b(assistant|operator|system)\s+(instructions?|override|update|message)\s*:', re.IGNORECASE),
+    "fake conversation turn": re.compile(r'^\s*(system|human|assistant|user)\s*:', re.IGNORECASE | re.MULTILINE),
+    "fake delimiter": re.compile(r'</?\s*(untrusted\w*|system|instructions?)\b[^>]*>', re.IGNORECASE),
+    "fake tool output": re.compile(r'\bFETCH_(LIMIT_REACHED|FAILED)\b|\[\d+\]\s*Title:'),
+    # Besides hiding instructions, these can make the API refuse the whole request.
+    "encoded payload": re.compile(r'[A-Za-z0-9+/]{60,}={0,2}'),
+}
+
+def find_injection_signs(text: str) -> list[str]:
+    """
+    Checks fetched text for signs of a prompt injection attempt.
+    Args:
+        text: Article text, or a feed item's title and summary.
+    Returns:
+        The labels of the signs found; empty if none.
+    """
+    # Long URLs, such as Google News links, would look like encoded payloads
+    without_urls = re.sub(r'https?://\S+', ' ', text)
+    return [label for label, pattern in INJECTION_SIGNS.items() if pattern.search(without_urls)]
 
 def normalize_url(url: str) -> str:
     """
@@ -30,7 +67,11 @@ def normalize_url(url: str) -> str:
     if not url:
         return ""
     # Split scheme, netloc, path, query, fragment
-    split_url = urlsplit(url)
+    try:
+        split_url = urlsplit(url)
+    except ValueError:
+        # A malformed URL can't match a fetched one, so it is reported as unverified
+        return url
     # Reconstruct url without query and fragment
     normalized = f"{split_url.scheme.lower()}://{split_url.netloc.lower()}{split_url.path}"
     # Remove trailing slashes
@@ -76,11 +117,47 @@ def check_cited_were_fetched(cited: list[str], fetched: dict[str, str]) -> tuple
             
     return verified, unverified
 
+def only_describes_fetch_problems(notes: str) -> bool:
+    """
+    Checks that every list item in the notes names a feed or fetch problem, or is "none".
+    Args:
+        notes: The text after the fetch notes marker.
+    Returns:
+        True if no list item looks like a news claim.
+    """
+    for line in notes.splitlines():
+        stripped = line.strip()
+        if not LIST_ITEM_START.match(stripped):
+            continue
+        item_text = LIST_ITEM_START.sub('', stripped).strip(' *_.').lower()
+        if item_text != "none" and not FETCH_PROBLEM_WORDS.search(item_text):
+            return False
+    return True
+
+def strip_fetch_notes(briefing: str) -> str:
+    """
+    Removes the fetch notes from the briefing, but only if they are its last section.
+    A heading after the marker starts a new section, and nothing is removed, unless
+    every list item after the marker describes a feed or fetch problem.
+    Args:
+        briefing: The text briefing content.
+    Returns:
+        The briefing text that must follow the citation rules.
+    """
+    markers = list(FETCH_NOTES_LINE.finditer(briefing))
+    if not markers:
+        return briefing
+    last_marker = markers[-1]
+    notes = briefing[last_marker.end():]
+    if SECTION_HEADING_LINE.search(briefing, last_marker.end()) and not only_describes_fetch_problems(notes):
+        return briefing
+    return briefing[:last_marker.start()]
+
 def check_uncited_items(briefing: str) -> list[str]:
     """
     Groups briefing items across line continuations and flags any list item
     that lacks a valid URL citation and is not an expected empty-section placeholder.
-    Text after FETCH_NOTES_MARKER is ignored.
+    A final FETCH_NOTES_MARKER section is ignored (see strip_fetch_notes).
 
     Args:
         briefing: The text briefing content to validate.
@@ -95,12 +172,12 @@ def check_uncited_items(briefing: str) -> list[str]:
             items.append(" ".join(current_item))
             current_item.clear()
 
-    lines = briefing.split(FETCH_NOTES_MARKER)[0].splitlines()
+    lines = strip_fetch_notes(briefing).splitlines()
     for line in lines:
         stripped = line.strip()
         
         # 1. Check for bullet or numbered list indicators
-        if re.match(r'^([-*•]|\d+\.)\s+', stripped):
+        if LIST_ITEM_START.match(stripped):
             save_current()
             current_item.append(stripped)
             
@@ -119,23 +196,23 @@ def check_uncited_items(briefing: str) -> list[str]:
     flagged_items = []
 
     # Standard placeholder variants
-    allowed_placeholders = [
+    allowed_placeholders = {
         EMPTY_SECTION_PLACEHOLDER.lower().rstrip("."),
         "nothing significant",
+        "nothing significant to report",
         "no developments",
         "nothing to report",
         "no significant developments"
-    ]
+    }
 
     for item in items:
         # Check if the combined item context contains a valid URL
         if not re.search(URL_PATTERN, item):
-            item_lower = item.lower()
-            
-            # Verify if this matches any of our allowed empty-section strings
-            is_placeholder = any(phrase in item_lower for phrase in allowed_placeholders) and len(item_lower.split()) < 15
-            
-            if not is_placeholder:
+            # The whole item, minus its bullet and Markdown wrappers, must be an allowed phrase
+            item_text = LIST_ITEM_START.sub('', item).lower()
+            item_text = item_text.strip(' *_"“”.')
+
+            if item_text not in allowed_placeholders:
                 flagged_items.append(item)
 
     return flagged_items
@@ -187,8 +264,19 @@ def is_allowed_domain(url: str, allowed_domains: Sequence[str]) -> bool:
     Returns:
         True if the domain is allowed, False otherwise.
     """
-    split_url = urlsplit(url)
-    domain = split_url.hostname
+    # HTTP clients and urlsplit can disagree about the host of these URLs.
+    # 'https://evil.example\@bbc.com' parses as bbc.com here but connects to evil.example.
+    if UNSAFE_URL_CHARS.search(url):
+        return False
+
+    try:
+        split_url = urlsplit(url)
+        domain = split_url.hostname
+    except ValueError:
+        return False
+
+    if "@" in split_url.netloc:
+        return False
 
     schema = split_url.scheme.lower()
 
@@ -235,9 +323,9 @@ def check_grounding(item: str, article_text: str) -> list[str]:
             
     return flagged_entities
 
-DEFAULT_ALLOWED_DOMAINS = ("bbc.co.uk", "bbci.co.uk", "bbc.com", "thehindu.com", "google.com")
+DEFAULT_ALLOWED_DOMAINS = ("bbc.co.uk", "bbci.co.uk", "bbc.com", "thehindu.com", "news.google.com")
 
-def run_evals(briefing: str, fetched: dict[str, str], headline_meta: dict[str, str], report_path: str | None = "eval_report.json", allowed_domains: Sequence[str] = DEFAULT_ALLOWED_DOMAINS, now: datetime | None = None) -> dict:
+def run_evals(briefing: str, fetched: dict[str, str], headline_meta: dict[str, str], report_path: str | None = "eval_report.json", allowed_domains: Sequence[str] = DEFAULT_ALLOWED_DOMAINS, now: datetime | None = None, suspected_injections: Sequence[str] = ()) -> dict:
     """
     Orchestrates all metrics and writes execution stats to eval_report.json if report_path is given.
     Args:
@@ -247,6 +335,7 @@ def run_evals(briefing: str, fetched: dict[str, str], headline_meta: dict[str, s
         report_path: The path where the evaluation report will be saved.
         allowed_domains: Domains citations may come from; defaults to DEFAULT_ALLOWED_DOMAINS.
         now: Reference time for the freshness check; defaults to the current UTC time.
+        suspected_injections: Fetched content the tools withheld as likely prompt injection.
     Returns:
         A dict containing evaluation metrics and pass/fail status.
     """
@@ -257,8 +346,8 @@ def run_evals(briefing: str, fetched: dict[str, str], headline_meta: dict[str, s
     stale, unknown_date = check_freshness(cited_urls, headline_meta, now=now)
     off_list = check_allowed_sources(cited_urls, allowed_domains)
     
-    # Strict validation rule
-    passed = len(unverified) == 0 and len(uncited_items) == 0
+    # Strict validation rule: a briefing with nothing verified has proved nothing
+    passed = len(verified) > 0 and not unverified and not uncited_items
     
     report = {
         "verified_count": len(verified),
@@ -267,6 +356,7 @@ def run_evals(briefing: str, fetched: dict[str, str], headline_meta: dict[str, s
         "stale": stale,
         "unknown_date": unknown_date,
         "off_list": off_list,
+        "suspected_injections": list(suspected_injections),
         "passed": passed
     }
     
@@ -277,13 +367,14 @@ def run_evals(briefing: str, fetched: dict[str, str], headline_meta: dict[str, s
         
     # Print a short summary summary table/log
     print("\n" + "="*40 + " EVALUATION REPORT " + "="*40)
-    print(f"Status: {'[PASSED] ✅' if passed else '[FAILED] ❌'}")
+    print(f"Status: {'[PASSED]' if passed else '[FAILED]'}")
     print(f"Verified Citations: {len(verified)}")
     print(f"Cited but not read: {len(unverified)}")
     print(f"Uncited Bullet Items Found: {len(uncited_items)}")
     print(f"Stale news warnings (>72h): {len(stale)}")
     print(f"Unknown publish date warnings: {len(unknown_date)}")
     print(f"Out of Bounds Domains: {len(off_list)}")
+    print(f"Suspected prompt injections withheld: {len(suspected_injections)}")
     print("=" * 99 + "\n")
     
     return report
