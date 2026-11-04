@@ -30,6 +30,32 @@ LIST_ITEM_START = re.compile(r'^([-*•]|\d+\.)\s+')
 # The prompt tells the agent to name the failing source, e.g. "BBC feed".
 FETCH_PROBLEM_WORDS = re.compile(r'\b(feeds?|fetch|fetched|fetches|fetching)\b', re.IGNORECASE)
 
+# Text that addresses the reading model instead of a human reader. This is a first filter
+# and easy to reword around: the tool restrictions are what actually limit an attack.
+INJECTION_SIGNS = {
+    "override instruction": re.compile(r'\b(ignore|disregard|forget)\b[^.\n]{0,40}\b(instructions?|prompts?|rules)\b', re.IGNORECASE),
+    "system prompt request": re.compile(r'\bsystem prompt\b', re.IGNORECASE),
+    "addressed to AI readers": re.compile(r'\b(ai|automated|language)\s+(agents?|systems?|models?|assistants?|summari[sz]ers?|readers?)\b[^.\n]{0,20}:', re.IGNORECASE),
+    "fake authority label": re.compile(r'\b(assistant|operator|system)\s+(instructions?|override|update|message)\s*:', re.IGNORECASE),
+    "fake conversation turn": re.compile(r'^\s*(system|human|assistant|user)\s*:', re.IGNORECASE | re.MULTILINE),
+    "fake delimiter": re.compile(r'</?\s*(untrusted\w*|system|instructions?)\b[^>]*>', re.IGNORECASE),
+    "fake tool output": re.compile(r'\bFETCH_(LIMIT_REACHED|FAILED)\b|\[\d+\]\s*Title:'),
+    # Besides hiding instructions, these can make the API refuse the whole request.
+    "encoded payload": re.compile(r'[A-Za-z0-9+/]{60,}={0,2}'),
+}
+
+def find_injection_signs(text: str) -> list[str]:
+    """
+    Checks fetched text for signs of a prompt injection attempt.
+    Args:
+        text: Article text, or a feed item's title and summary.
+    Returns:
+        The labels of the signs found; empty if none.
+    """
+    # Long URLs, such as Google News links, would look like encoded payloads
+    without_urls = re.sub(r'https?://\S+', ' ', text)
+    return [label for label, pattern in INJECTION_SIGNS.items() if pattern.search(without_urls)]
+
 def normalize_url(url: str) -> str:
     """
     Strip query string, fragments, trailing slashes and normalize the scheme and netloc to lowercase.
@@ -299,7 +325,7 @@ def check_grounding(item: str, article_text: str) -> list[str]:
 
 DEFAULT_ALLOWED_DOMAINS = ("bbc.co.uk", "bbci.co.uk", "bbc.com", "thehindu.com", "news.google.com")
 
-def run_evals(briefing: str, fetched: dict[str, str], headline_meta: dict[str, str], report_path: str | None = "eval_report.json", allowed_domains: Sequence[str] = DEFAULT_ALLOWED_DOMAINS, now: datetime | None = None) -> dict:
+def run_evals(briefing: str, fetched: dict[str, str], headline_meta: dict[str, str], report_path: str | None = "eval_report.json", allowed_domains: Sequence[str] = DEFAULT_ALLOWED_DOMAINS, now: datetime | None = None, suspected_injections: Sequence[str] = ()) -> dict:
     """
     Orchestrates all metrics and writes execution stats to eval_report.json if report_path is given.
     Args:
@@ -309,6 +335,7 @@ def run_evals(briefing: str, fetched: dict[str, str], headline_meta: dict[str, s
         report_path: The path where the evaluation report will be saved.
         allowed_domains: Domains citations may come from; defaults to DEFAULT_ALLOWED_DOMAINS.
         now: Reference time for the freshness check; defaults to the current UTC time.
+        suspected_injections: Fetched content the tools withheld as likely prompt injection.
     Returns:
         A dict containing evaluation metrics and pass/fail status.
     """
@@ -329,6 +356,7 @@ def run_evals(briefing: str, fetched: dict[str, str], headline_meta: dict[str, s
         "stale": stale,
         "unknown_date": unknown_date,
         "off_list": off_list,
+        "suspected_injections": list(suspected_injections),
         "passed": passed
     }
     
@@ -346,6 +374,7 @@ def run_evals(briefing: str, fetched: dict[str, str], headline_meta: dict[str, s
     print(f"Stale news warnings (>72h): {len(stale)}")
     print(f"Unknown publish date warnings: {len(unknown_date)}")
     print(f"Out of Bounds Domains: {len(off_list)}")
+    print(f"Suspected prompt injections withheld: {len(suspected_injections)}")
     print("=" * 99 + "\n")
     
     return report
