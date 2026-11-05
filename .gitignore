@@ -12,3 +12,4 @@ venv/
 # Generated outputs
 eval_report.json
 claude-review/
+injection_suite/results/
