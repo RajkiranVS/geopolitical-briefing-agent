@@ -23,6 +23,7 @@ The agent reads live RSS feeds, fetches the full text of selected articles and w
   - [Running the Tests](#running-the-tests)
 - [CI/CD](#cicd)
 - [Using the Evaluations](#using-the-evaluations)
+- [Threat Model](#threat-model)
 - [How the Evals Evolved](#how-the-evals-evolved)
 - [Customisation](#customisation)
 - [Known Limitations](#known-limitations)
@@ -368,7 +369,7 @@ Attacks on the live model with the network stubbed, before and after the defence
 
 The full suite on the final code had 20 attacks with 3 runs each: 0 of 60 runs had a forged URL reach the network, a marker in the briefing body, a leaked system prompt or an empty briefing. The fake correction ran 10 more times because its result varies from run to run.
 
-These results cover one model (`claude-haiku-5-5`), a small number of runs and one day's news (4 November 2026; 88 of the 171 linked articles didn't download and weren't scanned). They are evidence, not a guarantee.
+These results cover one model (`claude-haiku-5-5`), a small number of runs and one day's news (5 November 2026; 88 of the 171 linked articles didn't download and weren't scanned). They are evidence, not a guarantee.
 
 ### Running the Tests
 
