@@ -120,10 +120,20 @@ def get_headlines(feed_url: str) -> str:
     if feed_url not in ALLOWED_FEEDS:
         return f"FETCH_FAILED: {feed_url} is not an allowed feed."
 
-    feed = feedparser.parse(feed_url)
-    # feedparser follows redirects, so check where the feed really came from
-    if not is_allowed_domain(feed.get("href") or feed_url, DEFAULT_ALLOWED_DOMAINS):
-        return f"FETCH_FAILED: {feed_url} redirected to a host that is not allowed."
+    # feedparser has no timeout or protection against private addresses, so download separately
+    # Parallel downloads occasionally return a cut-off body with status 200, so try a bad parse twice
+    for _ in range(2):
+        response = fetch_response(feed_url, config=FETCH_CONFIG)
+        if not response or response.status != 200 or not response.data:
+            return f"FETCH_FAILED: {feed_url}"
+
+        # Redirects are followed, so check where the feed really came from
+        if not is_allowed_domain(response.url, DEFAULT_ALLOWED_DOMAINS):
+            return f"FETCH_FAILED: {feed_url} redirected to a host that is not allowed."
+
+        feed = feedparser.parse(response.data)
+        if feed.entries and not feed.get("bozo"):
+            break
 
     headlines = []
     limit = 15
@@ -221,6 +231,9 @@ def fetch_article(url: str) -> str:
 tools = [get_headlines, fetch_article]
 tools_by_name = {tool.name: tool for tool in tools}
 model_with_tools = model.bind_tools(tools)
+# The message history contains tool calls, so the tools must stay defined even when none may be used.
+model_final_answer = model.bind_tools(tools, tool_choice={"type": "none"})
+MAX_ROUNDS = 15
 
 from langgraph.graph import add_messages
 from langchain.messages import (
@@ -228,20 +241,23 @@ from langchain.messages import (
     SystemMessage,
     HumanMessage,
     ToolCall,
+    ToolMessage,
 )
 
 
 @task
-def call_llm(messages: Sequence[BaseMessage]) -> AIMessage:
+def call_llm(messages: Sequence[BaseMessage], allow_tools: bool = True) -> AIMessage:
     """
     Call the language model with the provided messages and return the model's response.
-    
+
     Args:
         messages: A sequence of BaseMessage objects to send to the model.
+        allow_tools: If False, the model must answer without calling a tool.
     Returns:
         The model's response as a BaseMessage object.
     """
-    return model_with_tools.invoke(
+    llm = model_with_tools if allow_tools else model_final_answer
+    return llm.invoke(
             [
                 SystemMessage(
                     content=SYSTEMPROMPT
@@ -252,9 +268,19 @@ def call_llm(messages: Sequence[BaseMessage]) -> AIMessage:
 
 @task
 def call_tool(tool_call: ToolCall):
-    """Performs the tool call"""
-    tool = tools_by_name[tool_call["name"]]
-    return tool.invoke(tool_call)
+    """Performs the tool call. Failures go back to the model, so they don't end the run."""
+    name = tool_call["name"]
+    tool = tools_by_name.get(name)
+    if tool is None:
+        return tool_error(tool_call, f"FETCH_FAILED: there is no tool called {name}.")
+    try:
+        return tool.invoke(tool_call)
+    except Exception as error:  # noqa: BLE001
+        return tool_error(tool_call, f"FETCH_FAILED: {name} failed with {type(error).__name__}.")
+
+def tool_error(tool_call: ToolCall, content: str) -> ToolMessage:
+    """Builds the result for a tool call that didn't run."""
+    return ToolMessage(content=content, tool_call_id=tool_call["id"], name=tool_call["name"], status="error")
 
 #Define Agent
 @entrypoint()
@@ -264,9 +290,19 @@ def agent(messages: list[BaseMessage]):
     rounds = 0
     while model_response.tool_calls:
         rounds += 1
-        if rounds > 15:
-            raise RuntimeError("Too many tool calls. Stopping to prevent infinite loop.")
-        
+        if rounds > MAX_ROUNDS:
+            # Keep the work done so far: every tool call needs a result, then the model must answer
+            limit_results = [
+                tool_error(tool_call, "Round limit reached. Write the briefing now using what you have.")
+                for tool_call in model_response.tool_calls
+            ]
+            messages = cast(
+                list[BaseMessage],
+                add_messages(list(messages), [model_response, *limit_results]),
+            )
+            model_response = call_llm(messages, allow_tools=False).result()
+            break
+
         tool_result_futures = [call_tool(tool_call) for tool_call in model_response.tool_calls]
         tool_results = [fut.result() for fut in tool_result_futures]
         messages = cast(
@@ -286,8 +322,13 @@ def main():
     suspected_injections.clear()
     #initialize the agent with an initial human message
     initial_messages = [HumanMessage(content=input("Enter your request for the geopolitical news briefing: "))]
-    final_state = agent.invoke(initial_messages)
-    last_message = cast(Sequence[BaseMessage], final_state)[-1]
+    try:
+        final_state = agent.invoke(initial_messages)
+    except Exception as error:  # noqa: BLE001
+        # Still run the evals, so a crash leaves a failed report and not just a traceback
+        print(f"The agent failed: {type(error).__name__}: {error}")
+        final_state = []
+    last_message = cast(Sequence[BaseMessage], final_state)[-1] if final_state else None
     raw_content = ""
     if hasattr(last_message, "content"):   
         content_payload = last_message.content
@@ -305,7 +346,7 @@ def main():
     print("--- RAW BRIEFING TEXT EXTRACTED ---")
     print(briefing_text)
     print("-----------------------------------")
-    if not briefing_text:
+    if not briefing_text and last_message is not None:
         stop_reason = getattr(last_message, "response_metadata", {}).get("stop_reason")
         print(f"The model returned no briefing (stop reason: {stop_reason}). Fetched content may have triggered a refusal.")
     report = run_evals(briefing_text, fetched, headline_meta, suspected_injections=suspected_injections)
