@@ -30,19 +30,23 @@ LIST_ITEM_START = re.compile(r'^([-*•]|\d+\.)\s+')
 # The prompt tells the agent to name the failing source, e.g. "BBC feed".
 FETCH_PROBLEM_WORDS = re.compile(r'\b(feeds?|fetch|fetched|fetches|fetching)\b', re.IGNORECASE)
 
-# Text that addresses the reading model instead of a human reader. This is a first filter
-# and easy to reword around: the tool restrictions are what actually limit an attack.
+# A tripwire, not a guarantee: a blocklist of text that addresses the reading model instead of
+# a human reader. Paraphrases, other languages and Unicode tricks get past it, and ordinary news
+# can match it, so it only flags content for the report and the model. The guarantees come from
+# what the tools can and can't do.
 INJECTION_SIGNS = {
-    "override instruction": re.compile(r'\b(ignore|disregard|forget)\b[^.\n]{0,40}\b(instructions?|prompts?|rules)\b', re.IGNORECASE),
+    "override instruction": re.compile(r'\b(ignore|disregard|forget)\b[^.\n]{0,30}\b(previous|prior|above|earlier|your|all)\b[^.\n]{0,20}\binstructions?\b', re.IGNORECASE),
     "system prompt request": re.compile(r'\bsystem prompt\b', re.IGNORECASE),
-    "addressed to AI readers": re.compile(r'\b(ai|automated|language)\s+(agents?|systems?|models?|assistants?|summari[sz]ers?|readers?)\b[^.\n]{0,20}:', re.IGNORECASE),
-    "fake authority label": re.compile(r'\b(assistant|operator|system)\s+(instructions?|override|update|message)\s*:', re.IGNORECASE),
-    "fake conversation turn": re.compile(r'^\s*(system|human|assistant|user)\s*:', re.IGNORECASE | re.MULTILINE),
+    "addressed to AI readers": re.compile(r'\b(ai|automated|language)\s+(agents?|systems?|models?|assistants?|summari[sz]ers?|readers?)\b[^.\n]{0,20}:[^\n]{0,120}\b(you must|must|call|fetch|fetch_article|get_headlines|add|ignore|do not|follow|end your|print|report that|state that)\b', re.IGNORECASE),
+    "fake authority label": re.compile(r'\b(assistant|operator|system)\s+(instructions?|override|message)\s*:', re.IGNORECASE),
+    "fake conversation turn": re.compile(r'^\s*(system|human|assistant)\s*:', re.IGNORECASE | re.MULTILINE),
     "fake delimiter": re.compile(r'</?\s*(untrusted\w*|system|instructions?)\b[^>]*>', re.IGNORECASE),
     "fake tool output": re.compile(r'\bFETCH_(LIMIT_REACHED|FAILED)\b|\[\d+\]\s*Title:'),
-    # Besides hiding instructions, these can make the API refuse the whole request.
     "encoded payload": re.compile(r'[A-Za-z0-9+/]{60,}={0,2}'),
 }
+# These can make the API refuse the whole request, which would lose the briefing,
+# so this content is withheld from the model instead of only being flagged.
+WITHHELD_INJECTION_SIGNS = {"encoded payload"}
 
 def find_injection_signs(text: str) -> list[str]:
     """
@@ -335,7 +339,7 @@ def run_evals(briefing: str, fetched: dict[str, str], headline_meta: dict[str, s
         report_path: The path where the evaluation report will be saved.
         allowed_domains: Domains citations may come from; defaults to DEFAULT_ALLOWED_DOMAINS.
         now: Reference time for the freshness check; defaults to the current UTC time.
-        suspected_injections: Fetched content the tools withheld as likely prompt injection.
+        suspected_injections: Fetched content the tools flagged or withheld as likely prompt injection.
     Returns:
         A dict containing evaluation metrics and pass/fail status.
     """
@@ -374,7 +378,7 @@ def run_evals(briefing: str, fetched: dict[str, str], headline_meta: dict[str, s
     print(f"Stale news warnings (>72h): {len(stale)}")
     print(f"Unknown publish date warnings: {len(unknown_date)}")
     print(f"Out of Bounds Domains: {len(off_list)}")
-    print(f"Suspected prompt injections withheld: {len(suspected_injections)}")
+    print(f"Suspected prompt injections: {len(suspected_injections)}")
     print("=" * 99 + "\n")
     
     return report
