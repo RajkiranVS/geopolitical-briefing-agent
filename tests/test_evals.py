@@ -328,6 +328,10 @@ def test_claim_after_reworded_placeholder_is_flagged():
         "Nothing from the fetched articles; Iran seized a tanker.",
         "Nothing further from the fetched articles. Iran seized a tanker.",
         "Nothing to report from the fetched articles on Iran seized a tanker and killed 50 people in a raid",
+        # Regression: free text was accepted as the topic, so this short claim passed.
+        "Nothing to report from the fetched articles on Iran seized a tanker",
+        "Nothing further from the fetched articles about India closing its border",
+        "Nothing from the fetched articles on India's foreign minister resigning",
     ):
         item = f"- {text}"
         assert check_uncited_items(f"## India\n{item}\n") == [item], text

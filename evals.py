@@ -18,8 +18,8 @@ URL_PATTERN = r'https?://[^\s()<>*`\[\]"“”‘’]+[^\s()<>.,:;\'"\?!*_`\[\]�
 FETCH_NOTES_MARKER = "FETCH NOTES:"
 EMPTY_SECTION_PLACEHOLDER = "Nothing to report from the fetched articles."
 # Models reword the placeholder ("Nothing further from the fetched articles bears directly on India").
-# It has to match the whole item, and the topic can't contain punctuation, so it can't carry a sentence of news.
-REWORDED_PLACEHOLDER = re.compile(r"nothing(\s+(further|else|more))?(\s+to\s+report)?\s+from\s+the\s+fetched\s+articles(\s+(bears?\s+directly\s+on|on|about|concerning|for)\s+[\w'’ -]{1,50})?")
+# It has to match the whole item, and the topic comes from a fixed list, because any free text there could be a news claim.
+REWORDED_PLACEHOLDER = re.compile(r"nothing(\s+(further|else|more))?(\s+to\s+report)?\s+from\s+the\s+fetched\s+articles(\s+(bears?\s+directly\s+on|on|about|concerning|for)\s+india(['’]s\s+(direct\s+)?foreign\s+(policy|affairs|relations))?)?")
 # Backslashes, whitespace and control characters are never valid in a URL we fetch.
 UNSAFE_URL_CHARS = re.compile(r'[\\\s\x00-\x1f\x7f]')
 
