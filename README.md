@@ -21,6 +21,7 @@ The agent reads live RSS feeds, fetches the full text of selected articles and w
   - [Configuration](#configuration)
   - [Running the Agent](#running-the-agent)
   - [Running the Tests](#running-the-tests)
+  - [Linting and Docstrings](#linting-and-docstrings)
 - [CI/CD](#cicd)
 - [Using the Evaluations](#using-the-evaluations)
 - [Threat Model](#threat-model)
@@ -53,13 +54,15 @@ geopolitical-briefing-agent/
 ├── geopolitical_news_agent.py   # Agent: model, tools, LangGraph loop and entry point
 ├── evals.py                     # Runtime evaluation checks for the briefing output
 ├── pytest.ini                   # pytest config (adds project root to path, sets test dir)
+├── ruff.toml                    # Lint rules, including Google style docstrings
 ├── requirements.txt             # Python dependencies
 ├── .env.example                 # Template for the required credentials
 ├── .gitignore
 ├── LICENSE                      # MIT
 ├── tests/
 │   ├── test_evals.py            # Unit tests for evals.py
-│   └── test_agent_main.py       # Unit tests for main() and the tools' security rules
+│   ├── test_agent_main.py       # Unit tests for main() and the tools' security rules
+│   └── test_docstrings.py       # Every function documents its Args, Returns and Raises
 ├── injection_suite/             # Prompt injection attacks against the live model (run by hand)
 ├── .github/
 │   ├── workflows/ci.yml         # CI: pytest + Claude Code project evaluation
@@ -104,7 +107,7 @@ The agent is built with the LangGraph **Functional API** (`@entrypoint` and `@ta
 
 | Tool | Purpose | Behaviour |
 |------|---------|-----------|
-| `get_headlines(feed_url)` | Discover stories | Refuses anything except the exact URLs in `ALLOWED_FEEDS` before fetching, downloads the feed with the same protected client as articles (30 seconds per attempt, about 2 minutes at worst), and discards a feed that redirected off the allowlist. Parses the RSS feed with `feedparser` and returns up to **15** numbered items (title, published date, link, summary). Records each `link → published` date in `headline_meta` (normalised URL as key) for the freshness check. Returns `FETCH_FAILED: <url>` if the feed is empty. |
+| `get_headlines(feed_url)` | Discover stories | Refuses anything except the exact URLs in `ALLOWED_FEEDS` before fetching, downloads the feed with the same protected client as articles (30 seconds per read and up to 3 attempts, so about 2 minutes if the server stops responding), and discards a feed that redirected off the allowlist. Parses the RSS feed with `feedparser` and returns up to **15** numbered items (title, published date, link, summary). Records each `link → published` date in `headline_meta` (normalised URL as key) for the freshness check. Returns `FETCH_FAILED: <url>` if the feed is empty. |
 | `fetch_article(url)` | Read a story | Refuses non-allowlisted URLs, then refuses once **5** articles have been fetched (`FETCH_LIMIT_REACHED`). Otherwise downloads the page with `trafilatura`, with certificate checks always on and its protection against private addresses. It discards a page that redirected off the allowlist, then extracts the article body, truncates it at a `Published -` footer if present, caps it at **4,000 characters**, records exactly that text in `fetched` and returns it with `Source: <url>`. Failed fetches return `FETCH_FAILED: <url>` and don't count toward the limit. |
 
 ### News Sources
@@ -283,6 +286,19 @@ pytest -k fresh   # run only the freshness tests
 
 `pytest.ini` adds the project root to `PYTHONPATH` and points pytest at the `tests/` directory. The tests make no network or API calls.
 
+### Linting and Docstrings
+
+```bash
+ruff check .     # lint, including docstring style
+```
+
+Every module, class and function has a Google style docstring, with `Args`, `Returns` and `Raises` sections where they apply. Two checks work together, because neither covers everything:
+
+- `ruff` ([`ruff.toml`](ruff.toml)) checks the style, flags an argument missing from an `Args` section, and flags a missing `Returns` section or an exception missing from `Raises`. It doesn't notice a function with no `Args` section at all, and it doesn't require docstrings on nested functions.
+- [`tests/test_docstrings.py`](tests/test_docstrings.py) covers those gaps for every function, including nested ones and test helpers.
+
+The docstrings of `get_headlines` and `fetch_article` are also the tool descriptions the model reads, so changing them can change how the agent behaves.
+
 ---
 
 ## CI/CD
@@ -410,7 +426,7 @@ The first live runs failed, and each failure was a real finding. Every fix lande
 | User request | Typed at the prompt when `main()` runs |
 | Allowed citation domains | `DEFAULT_ALLOWED_DOMAINS` in `evals.py` |
 | Freshness window | The `max_hours` argument of `check_freshness` (default 72) |
-| Accepted empty-section phrases | `allowed_placeholders` in `check_uncited_items` |
+| Accepted empty-section phrases | `allowed_placeholders` in `check_uncited_items`, and `REWORDED_PLACEHOLDER` in `evals.py` for rewordings |
 
 ---
 
@@ -425,6 +441,8 @@ The first live runs failed, and each failure was a real finding. Every fix lande
 - **Prompt injection can be reduced, not eliminated.** The tool restrictions hold even if the model is fooled, but only the model's judgement stops a false claim from reaching the briefing. A planted "correction" in a real article can't be told apart from a genuine one. The text screen is easy to reword around, and it also flags ordinary news that uses similar wording, so a `suspected_injections` entry is a prompt to look, not proof of an attack. If the API refuses because of fetched content, the run reports that and exits 1 with no briefing.
 - **Redirects are checked after they happen.** The tools discard content from a redirect off the allowlist, but the request to that host has already been made. `trafilatura` blocks private addresses before connecting, for both tools.
 - **Google News links are redirects.** Google News RSS items point to `news.google.com` URLs rather than to the publisher, which is why `news.google.com` is on the default allow-list. `trafilatura` usually can't follow these redirects, so `fetch_article` typically returns `FETCH_FAILED` for Google News items. Because the agent only reports stories it fetched, the Google News feed rarely contributes to the briefing.
+- **The download timeout isn't a total limit.** It applies to each read, so a stalled server fails after about 2 minutes, but one that keeps sending a little at a time isn't cut off until the body reaches trafilatura's size limit. The tools only download from allowlisted hosts, which limits who could do this.
+- **Google News sometimes sends a cut-off feed with status 200.** The cause isn't known. `get_headlines` downloads a feed again if it can't be parsed. Articles have no such retry: in one test on 6 November 2026, none of 384 parallel downloads from BBC and The Hindu came back cut off, but that test didn't cover Google News article links.
 - **Freshness depends on feed metadata.** Stories without a parseable `Published` date are reported as `unknown_date`, not as stale.
 - **Dependencies are not pinned.** `requirements.txt` lists package names only.
 

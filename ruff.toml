@@ -1,0 +1,19 @@
+# Python 3.10 is the oldest version CI tests, so rules that need newer syntax stay off.
+target-version = "py310"
+
+[lint]
+# DOC rules are in preview. Only the ones named below are turned on, so other preview rules can't appear.
+preview = true
+explicit-preview-rules = true
+extend-select = [
+    "D",        # docstring style
+    "DOC102",   # documents an argument the function doesn't have
+    "DOC201",   # returns a value but has no Returns section
+    "DOC202",   # has a Returns section but returns nothing
+    "DOC402",   # yields but has no Yields section
+    "DOC403",   # has a Yields section but yields nothing
+    "DOC501",   # raises an exception that the Raises section doesn't list
+]
+
+[lint.pydocstyle]
+convention = "google"
