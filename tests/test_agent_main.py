@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from feedparser import FeedParserDict
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 
 @pytest.fixture
@@ -124,13 +124,16 @@ def set_fetch_response(monkeypatch, module, response) -> list[dict]:
 def set_feed(monkeypatch, module, final_url: str, title: str = "T", summary: str = "S") -> list[str]:
     requests = []
 
-    def fake_parse(url):
+    def fake_fetch_response(url, **kwargs):
         requests.append(url)
+        return SimpleNamespace(url=final_url, status=200, data=b"<rss/>")
+
+    def fake_parse(data):
         return FeedParserDict(
-            href=final_url,
             entries=[FeedParserDict(title=title, published="Mon, 02 Nov 2026 10:00:00 GMT", link=ARTICLE_URL, summary=summary)],
         )
 
+    monkeypatch.setattr(module, "fetch_response", fake_fetch_response)
     monkeypatch.setattr(module.feedparser, "parse", fake_parse)
     return requests
 
@@ -203,6 +206,155 @@ def test_get_headlines_discards_redirect_off_the_allowlist(tools, monkeypatch):
     assert result.startswith("FETCH_FAILED")
     assert "Title: T" not in result
     assert tools.headline_meta == {}
+
+
+# Failures: a broken tool or a stuck model must not lose the run
+
+FEED_CALL = {"name": "get_headlines", "args": {"feed_url": "https://example.com/feed"}, "id": "call_1", "type": "tool_call"}
+
+
+class ScriptedModel:
+    """Stands in for the bound model and records the messages it was sent."""
+
+    def __init__(self, responses):
+        self.responses = responses
+        self.calls = []
+
+    def invoke(self, messages):
+        self.calls.append(messages)
+        return self.responses[min(len(self.calls), len(self.responses)) - 1]
+
+
+def use_models(monkeypatch, module, tool_model, final_model=None):
+    monkeypatch.setattr(module, "model_with_tools", tool_model)
+    monkeypatch.setattr(module, "model_final_answer", final_model or ScriptedModel([AIMessage(content="unused")]))
+
+
+def test_feed_download_uses_the_protected_client(tools, monkeypatch):
+    # Regression: feedparser downloaded feeds itself, with no timeout or private address protection.
+    received = {}
+
+    def fake_fetch_response(url, **kwargs):
+        received.update(kwargs)
+
+    monkeypatch.setattr(tools, "fetch_response", fake_fetch_response)
+    assert tools.get_headlines.invoke({"feed_url": tools.ALLOWED_FEEDS[0]}).startswith("FETCH_FAILED")
+    assert received["config"] is tools.FETCH_CONFIG
+    assert tools.FETCH_CONFIG.getint("DEFAULT", "DOWNLOAD_TIMEOUT") > 0
+
+
+def test_feed_error_status_returns_failure(tools, monkeypatch):
+    monkeypatch.setattr(tools, "fetch_response", lambda url, **kwargs: SimpleNamespace(url=url, status=500, data=b"oops"))
+    assert tools.get_headlines.invoke({"feed_url": tools.ALLOWED_FEEDS[0]}).startswith("FETCH_FAILED")
+
+
+def test_cut_off_feed_is_downloaded_again(tools, monkeypatch):
+    # Regression: a truncated body with status 200 parsed as empty and lost the whole feed.
+    complete = b'<?xml version="1.0"?><rss version="2.0"><channel><item><title>Talks resume</title><link>https://www.bbc.com/news/world-123</link></item></channel></rss>'
+    bodies = [complete[:60], complete]
+    requests = []
+
+    def fake_fetch_response(url, **kwargs):
+        requests.append(url)
+        return SimpleNamespace(url=url, status=200, data=bodies[len(requests) - 1])
+
+    monkeypatch.setattr(tools, "fetch_response", fake_fetch_response)
+    result = tools.get_headlines.invoke({"feed_url": tools.ALLOWED_FEEDS[0]})
+    assert "Title: Talks resume" in result
+    assert len(requests) == 2
+
+
+def test_feed_that_stays_unparseable_returns_failure(tools, monkeypatch):
+    requests = []
+
+    def fake_fetch_response(url, **kwargs):
+        requests.append(url)
+        return SimpleNamespace(url=url, status=200, data=b"<rss><chan")
+
+    monkeypatch.setattr(tools, "fetch_response", fake_fetch_response)
+    assert tools.get_headlines.invoke({"feed_url": tools.ALLOWED_FEEDS[0]}).startswith("FETCH_FAILED")
+    assert len(requests) == 2
+
+
+def test_failed_feed_download_is_not_repeated(tools, monkeypatch):
+    # The client already retries, so a second attempt would double the wait on a hanging feed.
+    requests = []
+
+    def fake_fetch_response(url, **kwargs):
+        requests.append(url)
+
+    monkeypatch.setattr(tools, "fetch_response", fake_fetch_response)
+    tools.get_headlines.invoke({"feed_url": tools.ALLOWED_FEEDS[0]})
+    assert len(requests) == 1
+
+
+def test_unknown_tool_goes_back_to_the_model(agent_module, monkeypatch):
+    # Regression: a made-up tool name raised KeyError and ended the run.
+    call = {"name": "made_up_tool", "args": {}, "id": "call_1", "type": "tool_call"}
+    tool_model = ScriptedModel([AIMessage(content="", tool_calls=[call]), AIMessage(content="Briefing")])
+    use_models(monkeypatch, agent_module, tool_model)
+    messages = agent_module.agent.invoke([HumanMessage(content="Brief me")])
+    assert messages[-1].content == "Briefing"
+    assert "no tool called made_up_tool" in messages[-2].content
+    assert messages[-2].tool_call_id == "call_1"
+
+
+def test_crashing_tool_goes_back_to_the_model(agent_module, monkeypatch):
+    # Regression: any exception in a tool ended the run and skipped the evals.
+    def crash(url, **kwargs):
+        raise ConnectionError("secret detail")
+
+    monkeypatch.setattr(agent_module, "fetch_response", crash)
+    call = {**FEED_CALL, "args": {"feed_url": agent_module.ALLOWED_FEEDS[0]}}
+    tool_model = ScriptedModel([AIMessage(content="", tool_calls=[call]), AIMessage(content="Briefing")])
+    use_models(monkeypatch, agent_module, tool_model)
+    messages = agent_module.agent.invoke([HumanMessage(content="Brief me")])
+    assert messages[-1].content == "Briefing"
+    assert messages[-2].content == "FETCH_FAILED: get_headlines failed with ConnectionError."
+
+
+def test_malformed_tool_arguments_go_back_to_the_model(agent_module, monkeypatch):
+    call = {"name": "fetch_article", "args": {"wrong": 1}, "id": "call_1", "type": "tool_call"}
+    tool_model = ScriptedModel([AIMessage(content="", tool_calls=[call]), AIMessage(content="Briefing")])
+    use_models(monkeypatch, agent_module, tool_model)
+    messages = agent_module.agent.invoke([HumanMessage(content="Brief me")])
+    assert messages[-1].content == "Briefing"
+    assert messages[-2].content.startswith("FETCH_FAILED: fetch_article failed")
+
+
+def test_round_limit_asks_for_a_final_answer(agent_module, monkeypatch):
+    # Regression: hitting the limit raised RuntimeError, losing the briefing and the eval.
+    tool_model = ScriptedModel([AIMessage(content="", tool_calls=[FEED_CALL])])
+    final_model = ScriptedModel([AIMessage(content="Final briefing")])
+    use_models(monkeypatch, agent_module, tool_model, final_model)
+    messages = agent_module.agent.invoke([HumanMessage(content="Brief me")])
+    assert messages[-1].content == "Final briefing"
+    assert len(tool_model.calls) == agent_module.MAX_ROUNDS + 1
+    assert len(final_model.calls) == 1
+    # The API rejects a tool call with no result, so the pending call must be answered.
+    assert final_model.calls[0][-1].tool_call_id == "call_1"
+    assert "Round limit reached" in final_model.calls[0][-1].content
+
+
+def test_final_answer_model_cannot_call_tools(agent_module):
+    assert agent_module.model_final_answer.kwargs["tool_choice"] == {"type": "none"}
+    assert len(agent_module.model_final_answer.kwargs["tools"]) == 2
+
+
+def test_main_reports_an_agent_crash_and_exits_1(agent_module, monkeypatch, tmp_path, capsys):
+    # Regression: a crash left a traceback and no eval report.
+    monkeypatch.chdir(tmp_path)
+
+    class CrashingAgent:
+        def invoke(self, messages):
+            raise TimeoutError("API timed out")
+
+    monkeypatch.setattr(agent_module, "agent", CrashingAgent())
+    with pytest.raises(SystemExit) as exit_info:
+        agent_module.main()
+    assert exit_info.value.code == 1
+    assert "The agent failed: TimeoutError: API timed out" in capsys.readouterr().out
+    assert (tmp_path / "eval_report.json").exists()
 
 
 # Prompt injection: these hold even if the model obeys the injected text
