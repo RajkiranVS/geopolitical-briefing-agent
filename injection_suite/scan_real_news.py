@@ -1,9 +1,8 @@
-'''
-Counts false positives: runs find_injection_signs over today's real feeds and articles.
+"""Counts false positives: runs find_injection_signs over today's real feeds and articles.
 
 Uses the network but not the Anthropic API. It checks the same text the tools send to the model.
 Any hit needs reading by hand, because a real attack would show up here too.
-'''
+"""
 
 import os
 import sys
@@ -22,6 +21,14 @@ from evals import find_injection_signs
 
 
 def scan_article(link: str) -> tuple[str, list[str]] | None:
+    """Downloads one article and checks the text the model would read.
+
+    Args:
+        link: The article's URL.
+
+    Returns:
+        The link and the signs found, or None if the article couldn't be read.
+    """
     response = fetch_response(link, decode=True, config=agent_module.FETCH_CONFIG)
     if not response or response.status != 200 or not response.html:
         return None
@@ -32,6 +39,7 @@ def scan_article(link: str) -> tuple[str, list[str]] | None:
 
 
 def main() -> None:
+    """Scans every item in the allowed feeds and every article they link to, then prints the counts."""
     links = []
     items = hits = 0
     for feed_url in agent_module.ALLOWED_FEEDS:

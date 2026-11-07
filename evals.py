@@ -1,29 +1,31 @@
-'''
-Runtime evaluation checks for the geopolitics briefing agent.
-'''
+"""Runtime evaluation checks for the geopolitics briefing agent."""
 
+import email.utils
 import json
 import re
 from collections.abc import Sequence
-from urllib.parse import urlsplit
-import email.utils
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 
 #Global Patterns
-# '*', square brackets, and double or curly quotes are never part of a URL (Markdown
+# '*', backticks, square brackets, and double or curly quotes are never part of a URL (Markdown
 # and prose wrappers). '_' and '!' can appear inside URLs, so they are only rejected
 # as the final character.
-URL_PATTERN = r'https?://[^\s()<>*\[\]"“”‘’]+[^\s()<>.,:;\'"\?!*_\[\]“”‘’]'
+URL_PATTERN = r'https?://[^\s()<>*`\[\]"“”‘’]+[^\s()<>.,:;\'"\?!*_`\[\]“”‘’]'
 
 # The prompt tells the agent to put feed/fetch problems after this line.
 # Everything after it describes the run, not the news, so it needs no citation.
 FETCH_NOTES_MARKER = "FETCH NOTES:"
 EMPTY_SECTION_PLACEHOLDER = "Nothing to report from the fetched articles."
+# Models reword the placeholder ("Nothing further from the fetched articles bears directly on India").
+# It has to match the whole item, and the topic comes from a fixed list, because any free text there could be a news claim.
+REWORDED_PLACEHOLDER = re.compile(r"nothing(\s+(further|else|more))?(\s+to\s+report)?\s+from\s+the\s+fetched\s+articles(\s+(bears?\s+directly\s+on|on|about|concerning|for)\s+india(['’]s\s+(direct\s+)?foreign\s+(policy|affairs|relations))?)?")
 # Backslashes, whitespace and control characters are never valid in a URL we fetch.
 UNSAFE_URL_CHARS = re.compile(r'[\\\s\x00-\x1f\x7f]')
 
 # The marker only counts at the start of its own line (Markdown wrappers allowed, any case).
-FETCH_NOTES_LINE = re.compile(rf'^[#*_ \t]*{re.escape(FETCH_NOTES_MARKER)}', re.MULTILINE | re.IGNORECASE)
+# Bold can close before the colon, as in **FETCH NOTES**:
+FETCH_NOTES_LINE = re.compile(rf'^[#*_ \t]*{re.escape(FETCH_NOTES_MARKER[:-1])}[*_ \t]*:', re.MULTILINE | re.IGNORECASE)
 # A Markdown heading, or a line that is entirely bold.
 SECTION_HEADING_LINE = re.compile(r'^[ \t]*(#{1,6}[ \t]|\*\*[^*\n]+\*\*:?[ \t]*$)', re.MULTILINE)
 LIST_ITEM_START = re.compile(r'^([-*•]|\d+\.)\s+')
@@ -49,10 +51,11 @@ INJECTION_SIGNS = {
 WITHHELD_INJECTION_SIGNS = {"encoded payload"}
 
 def find_injection_signs(text: str) -> list[str]:
-    """
-    Checks fetched text for signs of a prompt injection attempt.
+    """Checks fetched text for signs of a prompt injection attempt.
+
     Args:
         text: Article text, or a feed item's title and summary.
+
     Returns:
         The labels of the signs found; empty if none.
     """
@@ -61,12 +64,14 @@ def find_injection_signs(text: str) -> list[str]:
     return [label for label, pattern in INJECTION_SIGNS.items() if pattern.search(without_urls)]
 
 def normalize_url(url: str) -> str:
-    """
-    Strip query string, fragments, trailing slashes and normalize the scheme and netloc to lowercase.
+    """Strips the query string, fragment and trailing slashes, and lowercases the scheme and host.
+
     Args:
         url: The URL to normalize.
+
     Returns:
-        The normalized URL.
+        The normalized URL. An empty URL gives an empty string, and a malformed URL comes back
+        unchanged so that it can't match a fetched one.
     """
     if not url:
         return ""
@@ -83,12 +88,13 @@ def normalize_url(url: str) -> str:
     return normalized
 
 def extract_citations(briefing: str) -> list[str]:
-    """
-    Finds every URL in the final text using regex and normalises them.
+    """Finds every URL in the final text using regex and normalizes them.
+
     Args:
         briefing: The text to search for URLs.
+
     Returns:
-        A list of normalized URLs found in the text.
+        The sorted, unique, normalized URLs found in the text.
     """
     raw_urls = re.findall(URL_PATTERN, briefing)
     normalized_urls = []
@@ -97,15 +103,14 @@ def extract_citations(briefing: str) -> list[str]:
     return sorted(set(normalized_urls))
 
 def check_cited_were_fetched(cited: list[str], fetched: dict[str, str]) -> tuple[list[str], list[str]]:
-    """
-    Returns (verified, unverified). unverified items were cited but never fetched.
+    """Splits the cited URLs into those that were fetched and those that weren't.
+
     Args:
         cited: List of cited URLs.
         fetched: Dict of {url: article_text} for all articles successfully fetched.
+
     Returns:
-        A tuple containing two lists:
-        - verified: URLs that were cited and successfully fetched.
-        - unverified: URLs that were cited but not found in the fetched articles.
+        A tuple (verified, unverified): URLs cited and fetched, and URLs cited but never fetched.
     """
     # Normalize fetched URLs keys for accurate comparison
     normalized_fetched = {normalize_url(url): text for url, text in fetched.items()}
@@ -122,10 +127,11 @@ def check_cited_were_fetched(cited: list[str], fetched: dict[str, str]) -> tuple
     return verified, unverified
 
 def only_describes_fetch_problems(notes: str) -> bool:
-    """
-    Checks that every list item in the notes names a feed or fetch problem, or is "none".
+    """Checks that every list item in the notes names a feed or fetch problem, or is "none".
+
     Args:
         notes: The text after the fetch notes marker.
+
     Returns:
         True if no list item looks like a news claim.
     """
@@ -139,12 +145,14 @@ def only_describes_fetch_problems(notes: str) -> bool:
     return True
 
 def strip_fetch_notes(briefing: str) -> str:
-    """
-    Removes the fetch notes from the briefing, but only if they are its last section.
+    """Removes the fetch notes from the briefing, but only if they are its last section.
+
     A heading after the marker starts a new section, and nothing is removed, unless
     every list item after the marker describes a feed or fetch problem.
+
     Args:
         briefing: The text briefing content.
+
     Returns:
         The briefing text that must follow the citation rules.
     """
@@ -158,13 +166,14 @@ def strip_fetch_notes(briefing: str) -> str:
     return briefing[:last_marker.start()]
 
 def check_uncited_items(briefing: str) -> list[str]:
-    """
-    Groups briefing items across line continuations and flags any list item
-    that lacks a valid URL citation and is not an expected empty-section placeholder.
-    A final FETCH_NOTES_MARKER section is ignored (see strip_fetch_notes).
+    """Flags list items that have no URL citation and aren't an empty-section placeholder.
+
+    Items are grouped across line continuations. A final FETCH_NOTES_MARKER section is
+    ignored (see strip_fetch_notes).
 
     Args:
         briefing: The text briefing content to validate.
+
     Returns:
         A list of joined item strings that lack citations.
     """
@@ -172,6 +181,7 @@ def check_uncited_items(briefing: str) -> list[str]:
     current_item = []
     
     def save_current():
+        """Moves the item being built into the finished items, if there is one."""
         if current_item:
             items.append(" ".join(current_item))
             current_item.clear()
@@ -216,19 +226,20 @@ def check_uncited_items(briefing: str) -> list[str]:
             item_text = LIST_ITEM_START.sub('', item).lower()
             item_text = item_text.strip(' *_"“”.')
 
-            if item_text not in allowed_placeholders:
+            if item_text not in allowed_placeholders and not REWORDED_PLACEHOLDER.fullmatch(item_text):
                 flagged_items.append(item)
 
     return flagged_items
 
 def check_freshness(cited: list[str], headline_meta: dict[str, str], max_hours: int = 72, now: datetime | None = None) -> tuple[list[str], list[str]]:
-    """
-    Flags citations older than max_hours. Checks timezone-aware datetimes.
+    """Flags citations older than max_hours, using timezone-aware datetimes.
+
     Args:
         cited: List of cited URLs.
         headline_meta: Dict of {url: published_date} for all headlines fetched.
         max_hours: Maximum age in hours before a citation is considered stale.
         now: Reference time for age calculation; defaults to the current UTC time.
+
     Returns:
         A tuple (stale, unknown_date): URLs older than max_hours, and URLs whose
         published date is missing, "Unknown", or unparseable.
@@ -260,13 +271,14 @@ def check_freshness(cited: list[str], headline_meta: dict[str, str], max_hours: 
     return stale_urls, unknown_date_urls
 
 def is_allowed_domain(url: str, allowed_domains: Sequence[str]) -> bool:
-    """
-    Checks if the domain of the given URL is in the allowed domains list.
+    """Checks if the domain of the given URL is in the allowed domains list.
+
     Args:
         url: The URL to check.
         allowed_domains: List of allowed domain strings (e.g., "bbc.co.uk").
+
     Returns:
-        True if the domain is allowed, False otherwise.
+        True if the domain is allowed, False otherwise, including for malformed URLs.
     """
     # HTTP clients and urlsplit can disagree about the host of these URLs.
     # 'https://evil.example\@bbc.com' parses as bbc.com here but connects to evil.example.
@@ -293,22 +305,24 @@ def is_allowed_domain(url: str, allowed_domains: Sequence[str]) -> bool:
 
 
 def check_allowed_sources(cited: list[str], allowed_domains: Sequence[str]) -> list[str]:
-    """
-    Flags any domain outside your feed host list.
+    """Flags any domain outside the feed host list.
+
     Args:
         cited: List of cited URLs.
         allowed_domains: List of allowed domain strings (e.g., "bbc.co.uk").
+
     Returns:
         A list of URLs that are outside the allowed domains.
     """
     return [url for url in cited if not is_allowed_domain(url, allowed_domains)]
 
 def check_grounding(item: str, article_text: str) -> list[str]:
-    """
-    Extracts entities (Numbers & Capitalised words) and verifies presence in source text.
+    """Extracts numbers and capitalised words from an item and looks for them in the source text.
+
     Args:
         item: The text item to check for grounding.
         article_text: The full text of the article to check against.
+
     Returns:
         A list of entities that are present in the item but missing from the article text.
     """
@@ -330,20 +344,23 @@ def check_grounding(item: str, article_text: str) -> list[str]:
 DEFAULT_ALLOWED_DOMAINS = ("bbc.co.uk", "bbci.co.uk", "bbc.com", "thehindu.com", "news.google.com")
 
 def run_evals(briefing: str, fetched: dict[str, str], headline_meta: dict[str, str], report_path: str | None = "eval_report.json", allowed_domains: Sequence[str] = DEFAULT_ALLOWED_DOMAINS, now: datetime | None = None, suspected_injections: Sequence[str] = ()) -> dict:
-    """
-    Orchestrates all metrics and writes execution stats to eval_report.json if report_path is given.
+    """Runs all the checks, prints a summary and writes the report if report_path is given.
+
     Args:
         briefing: The final text output of the agent.
         fetched: A dict of {url: article_text} for all articles successfully fetched.
         headline_meta: A dict of {url: published_date} for all headlines fetched.
-        report_path: The path where the evaluation report will be saved.
+        report_path: The path where the evaluation report will be saved; None skips writing it.
         allowed_domains: Domains citations may come from; defaults to DEFAULT_ALLOWED_DOMAINS.
         now: Reference time for the freshness check; defaults to the current UTC time.
         suspected_injections: Fetched content the tools flagged or withheld as likely prompt injection.
+
     Returns:
         A dict containing evaluation metrics and pass/fail status.
+
+    Raises:
+        OSError: If the report file can't be written.
     """
-    
     cited_urls = extract_citations(briefing)
     verified, unverified = check_cited_were_fetched(cited_urls, fetched)
     uncited_items = check_uncited_items(briefing)

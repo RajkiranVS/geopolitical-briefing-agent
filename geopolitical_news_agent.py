@@ -1,20 +1,41 @@
+"""LangGraph agent that writes a cited geopolitical news briefing from a fixed list of feeds."""
 import html
+import logging
 import re
 import secrets
 import sys
+from collections.abc import Sequence
+from typing import cast
+
 import feedparser
+from langchain.chat_models import init_chat_model
+from langchain.messages import (
+    AIMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolCall,
+    ToolMessage,
+)
+from langchain.tools import tool
+from langchain_core.messages import BaseMessage
+from langgraph.func import entrypoint, task
+from langgraph.graph import add_messages
 from trafilatura import extract
 from trafilatura.downloads import fetch_response
 from trafilatura.settings import use_config
-from langchain.tools import tool
-from langchain.chat_models import init_chat_model
-from langchain_core.messages import BaseMessage
-from collections.abc import Sequence
-from typing import cast
-from langchain_core.messages import BaseMessage
-from langgraph.func import entrypoint, task
 
-from evals import WITHHELD_INJECTION_SIGNS, find_injection_signs, is_allowed_domain, normalize_url, run_evals, DEFAULT_ALLOWED_DOMAINS, FETCH_NOTES_MARKER, EMPTY_SECTION_PLACEHOLDER
+from evals import (
+    DEFAULT_ALLOWED_DOMAINS,
+    EMPTY_SECTION_PLACEHOLDER,
+    FETCH_NOTES_MARKER,
+    WITHHELD_INJECTION_SIGNS,
+    find_injection_signs,
+    is_allowed_domain,
+    normalize_url,
+    run_evals,
+)
+
+logger = logging.getLogger(__name__)
 
 model = init_chat_model(model="claude-haiku-5-5")
 
@@ -76,34 +97,58 @@ headline_links: set[str] = set()
 suspected_injections: list[str] = []
 
 def clean_feed_text(text: str, limit: int = 500) -> str:
-    """Strips HTML and line breaks from feed text, so it can't imitate another feed item."""
+    """Strips HTML and line breaks from feed text, so it can't imitate another feed item.
+
+    Args:
+        text: The raw title, summary or date from the feed.
+        limit: The maximum number of characters to keep.
+
+    Returns:
+        The cleaned text on one line.
+    """
     no_tags = re.sub(r"<[^>]+>", " ", html.unescape(text))
     return " ".join(no_tags.split())[:limit]
 
 def trim_article(text: str) -> str:
-    """Cuts an article down to what the model reads: no 'Published -' footer, at most 4,000 characters."""
+    """Cuts an article down to what the model reads.
+
+    This removes the 'Published -' footer and keeps at most 4,000 characters.
+
+    Args:
+        text: The article text extracted from the page.
+
+    Returns:
+        The trimmed article text.
+    """
     marker = text.find("Published -")
     if marker != -1:
         text = text[:marker]
     return text[:4000]
 
 def fence_untrusted(content: str) -> str:
-    """Marks fetched text as data. The random id stops the text from faking the closing tag."""
+    """Marks fetched text as data. The random id stops the text from faking the closing tag.
+
+    Args:
+        content: The fetched text to wrap.
+
+    Returns:
+        The text wrapped in untrusted_content tags that share a new random id.
+    """
     fence_id = secrets.token_hex(8)
     return f'<untrusted_content id="{fence_id}">\n{content}\n</untrusted_content id="{fence_id}">'
 
 #Define Tools
 @tool
 def get_headlines(feed_url: str) -> str:
-    """
-    Fetch the latest headlines from a news feed.
-    Returns numbered items with title, published date, link and summary.
+    """Fetch the latest headlines from a news feed.
+
     Use this to discover stories before reading them with fetch_article.
-    
+
     Args:
         feed_url: The URL of the news feed to fetch headlines from.
+
     Returns:
-        '''
+        Numbered items in untrusted_content tags, or a message starting with FETCH_FAILED. Item format:
         [1]
         Title: Headline 1
         Published: Date 1
@@ -115,7 +160,6 @@ def get_headlines(feed_url: str) -> str:
         Link: URL 2
         Summary: Summary 2
         ...
-        '''
     """
     if feed_url not in ALLOWED_FEEDS:
         return f"FETCH_FAILED: {feed_url} is not an allowed feed."
@@ -182,13 +226,14 @@ def get_headlines(feed_url: str) -> str:
 
 @tool
 def fetch_article(url: str) -> str:
-    """
-    Fetch the full text of an article from a given URL.
-    
+    """Fetch the full text of an article from a given URL.
+
     Args:
         url: The URL of the article to fetch.
+
     Returns:
-        The full text of the article along with the cited source URL.
+        The article text in untrusted_content tags, followed by its source URL, or a message starting with
+        FETCH_FAILED or FETCH_LIMIT_REACHED if it can't be read.
     """
     if not is_allowed_domain(url, DEFAULT_ALLOWED_DOMAINS):
         return f"FETCH_FAILED: {url} is not an allowed domain."
@@ -235,26 +280,20 @@ model_with_tools = model.bind_tools(tools)
 model_final_answer = model.bind_tools(tools, tool_choice={"type": "none"})
 MAX_ROUNDS = 15
 
-from langgraph.graph import add_messages
-from langchain.messages import (
-    AIMessage,
-    SystemMessage,
-    HumanMessage,
-    ToolCall,
-    ToolMessage,
-)
-
 
 @task
 def call_llm(messages: Sequence[BaseMessage], allow_tools: bool = True) -> AIMessage:
-    """
-    Call the language model with the provided messages and return the model's response.
+    """Calls the language model with the system prompt and the provided messages.
 
     Args:
         messages: A sequence of BaseMessage objects to send to the model.
         allow_tools: If False, the model must answer without calling a tool.
+
     Returns:
-        The model's response as a BaseMessage object.
+        The model's response.
+
+    Raises:
+        anthropic.APIError: If the API call still fails after the client's retries.
     """
     llm = model_with_tools if allow_tools else model_final_answer
     return llm.invoke(
@@ -268,23 +307,51 @@ def call_llm(messages: Sequence[BaseMessage], allow_tools: bool = True) -> AIMes
 
 @task
 def call_tool(tool_call: ToolCall):
-    """Performs the tool call. Failures go back to the model, so they don't end the run."""
+    """Performs the tool call. Failures go back to the model, so they don't end the run.
+
+    Args:
+        tool_call: The tool call the model asked for.
+
+    Returns:
+        The tool's result, or an error result if the tool doesn't exist or it failed.
+    """
     name = tool_call["name"]
     tool = tools_by_name.get(name)
     if tool is None:
         return tool_error(tool_call, f"FETCH_FAILED: there is no tool called {name}.")
     try:
         return tool.invoke(tool_call)
-    except Exception as error:  # noqa: BLE001
+    except Exception as error:
+        # The model only sees the error type, so keep the details for whoever debugs the run
+        logger.exception("Tool %s failed", name)
         return tool_error(tool_call, f"FETCH_FAILED: {name} failed with {type(error).__name__}.")
 
 def tool_error(tool_call: ToolCall, content: str) -> ToolMessage:
-    """Builds the result for a tool call that didn't run."""
+    """Builds the result for a tool call that didn't run.
+
+    Args:
+        tool_call: The tool call being answered.
+        content: The message to send back to the model.
+
+    Returns:
+        A ToolMessage with error status.
+    """
     return ToolMessage(content=content, tool_call_id=tool_call["id"], name=tool_call["name"], status="error")
 
 #Define Agent
 @entrypoint()
 def agent(messages: list[BaseMessage]):
+    """Runs the model and its tools until the model answers or the round limit is reached.
+
+    Args:
+        messages: The conversation so far, starting with the user's request.
+
+    Returns:
+        The conversation with the model's final response at the end.
+
+    Raises:
+        anthropic.APIError: If a model call still fails after the client's retries.
+    """
     model_response = call_llm(messages).result()
 
     rounds = 0
@@ -314,8 +381,11 @@ def agent(messages: list[BaseMessage]):
 
 
 def main():
-    '''
-    Main function to execute the geopolitical news agent.'''
+    """Asks for a request, runs the agent, prints the briefing and evaluates it.
+
+    Raises:
+        SystemExit: With code 1 if the briefing fails the evals.
+    """
     fetched.clear()
     headline_meta.clear()
     headline_links.clear()

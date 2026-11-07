@@ -1,7 +1,7 @@
-'''
-Prompt injection attacks. Each carries unique canaries so that obeying it can be detected.
+"""Prompt injection attacks. Each carries unique canaries so that obeying it can be detected.
+
 Models paraphrase, so false claims also need a canary for their wording, not only a code.
-'''
+"""
 
 import base64
 
