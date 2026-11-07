@@ -241,32 +241,43 @@ def check_uncited_items(briefing: str) -> list[str]:
             items.append(" ".join(current_item))
             current_item.clear()
 
+    # A citation paragraph may only join the item just before it, with nothing but blank lines between
+    can_join_previous = False
     lines = strip_fetch_notes(briefing).splitlines()
     for line in lines:
         stripped = line.strip()
-        
+
         # 1. Check for bullet or numbered list indicators
         if LIST_ITEM_START.match(stripped):
             save_current()
             current_item.append(stripped)
-            
-        # 2. Headings, titles, rules, paragraph breaks and a marker line such as "FETCH NOTES: none"
-        # end the item and need no citation
-        elif (
-            not stripped
-            or MARKUP_LABEL_LINE.match(stripped)
-            or (not current_item and TEXT_LABEL_LINE.match(stripped))
-            or is_notes_marker_line(stripped)
-        ):
+            can_join_previous = False
+
+        # 2. A paragraph break ends the item
+        elif not stripped:
+            if current_item:
+                save_current()
+                can_join_previous = True
+
+        # 3. Inside an item, only a Markdown heading or a marker line ends it. Bold text, rules
+        # and lines ending in a colon are part of the item.
+        elif current_item and not stripped.startswith("#") and not is_notes_marker_line(stripped):
+            current_item.append(stripped)
+
+        # 4. Between items, labels and a marker line such as "FETCH NOTES: none" need no citation
+        elif MARKUP_LABEL_LINE.match(stripped) or TEXT_LABEL_LINE.match(stripped) or is_notes_marker_line(stripped):
             save_current()
+            can_join_previous = False
 
-        # A citation in its own paragraph belongs to the item before it
-        elif not current_item and items and SOURCE_LINE.match(stripped):
+        # 5. A citation in its own paragraph belongs to the item just before it
+        elif can_join_previous and SOURCE_LINE.match(stripped):
             items[-1] += " " + stripped
+            can_join_previous = False
 
-        # 3. Anything else continues the open item, or starts a prose paragraph, which needs a citation too
+        # 6. Anything else starts a prose paragraph, which needs a citation too
         else:
             current_item.append(stripped)
+            can_join_previous = False
 
     # Save the final residual item block if one remains open
     save_current()

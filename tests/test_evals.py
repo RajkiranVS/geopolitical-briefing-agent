@@ -667,3 +667,17 @@ def test_wrapped_bullet_line_ending_in_a_colon_stays_in_the_bullet():
         "  tariffs, transit and visas. Source: https://www.thehindu.com/news/article1.ece\n"
     )
     assert check_uncited_items(briefing) == []
+
+def test_bold_line_inside_a_bullet_stays_in_the_bullet():
+    """Checks that a bold line or a rule inside a bullet doesn't split it from its citation."""
+    # Regression: found in review. A bold continuation line ended the bullet, so it lost its citation.
+    for middle in ("**Trade talks resume**", "---"):
+        briefing = f"- Ministers met in Delhi on Tuesday.\n  {middle}\n  (The Hindu, https://www.thehindu.com/news/article1.ece)\n"
+        assert check_uncited_items(briefing) == [], middle
+
+def test_source_paragraph_after_a_heading_does_not_cite_the_previous_section():
+    """Checks that a citation paragraph can't rescue an uncited item from an earlier section."""
+    # Regression: found in review. The citation joined the last item, whatever came between them.
+    item = "- Ministers agreed a new sanctions package."
+    briefing = f"## Europe\n{item}\n\n## India\nSource: https://www.thehindu.com/news/article1.ece\n"
+    assert item in check_uncited_items(briefing)
