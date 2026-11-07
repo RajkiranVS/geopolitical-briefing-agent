@@ -2,7 +2,7 @@
 
 A **LangGraph + Claude** agent that writes geopolitical news briefings citing **only articles it actually read**, and proves it with deterministic checks in plain Python, not an LLM.
 
-The agent reads live RSS feeds, fetches the full text of selected articles and writes a neutral, attributed briefing with a dedicated section on developments affecting India. After every run, `evals.py` verifies that each citation points to an article the agent fetched, that every bullet is cited, that stories are recent and that every source is on the allowlist. Runs are traced in **LangSmith**, and the evals are covered by a `pytest` suite.
+The agent reads live RSS feeds, fetches the full text of selected articles and writes a neutral, attributed briefing with a dedicated section on developments affecting India. After every run, `evals.py` verifies that each citation points to an article the agent fetched, that every bullet and paragraph is cited, that stories are recent and that every source is on the allowlist. Runs are traced in **LangSmith**, and the evals are covered by a `pytest` suite.
 
 ---
 
@@ -41,7 +41,7 @@ The agent reads live RSS feeds, fetches the full text of selected articles and w
 - **Prompt injection defences**: fetched text is treated as hostile, in layers. `fetch_article` only follows links from real feed items, so text inside an article or summary can't send the agent anywhere new. Fetched text is wrapped in `<untrusted_content>` tags with a random id, and the system prompt says text inside them is never an instruction. Text that looks like an attempt to instruct the model stays in the tags with a warning to the model, and is listed under `suspected_injections` in the report, so genuine stories aren't lost. Only encoded payloads are withheld, because they can make the API refuse the whole request. `injection_suite/` tests all this against the live model. Feed text also has HTML and line breaks removed and is capped at 500 characters. See [Known Limitations](#known-limitations).
 - **Bounded execution, enforced in code**: `fetch_article` refuses after 5 articles (not just a prompt instruction), and after 15 tool-calling rounds the model must answer with what it has.
 - **Failures don't lose the run**: a tool error goes back to the model as `FETCH_FAILED`, and if the agent itself crashes, the run still writes a failed eval report and exits 1.
-- **Runtime evals on every run**: `main()` calls `run_evals()` after the agent finishes. Deterministic checks verify that citations were actually fetched, that every bullet is cited, that stories are recent, and that sources come from allowed domains. The results are printed and written to a JSON report.
+- **Runtime evals on every run**: `main()` calls `run_evals()` after the agent finishes. Deterministic checks verify that citations were actually fetched, that every bullet and paragraph is cited, that stories are recent, and that sources come from allowed domains. The results are printed and written to a JSON report.
 - **Prompt–eval contracts**: fixed strings shared by the prompt and the eval (`FETCH NOTES:` and the empty-section placeholder) keep run notes and "nothing to report" lines from being misread as uncited claims.
 - **Unit tested**: a `pytest` suite covers URL normalisation, citation extraction, the uncited-item detection, freshness boundaries and the full eval pipeline.
 
@@ -151,7 +151,7 @@ A briefing **passes** only if all of these are true:
 
 - at least one citation was verified (`verified_count` is above 0), so an empty, prose-only or refused briefing fails,
 - every cited URL was actually fetched (`unverified` is empty), **and**
-- every bullet item carries a citation (`uncited_items` is empty).
+- every bullet item and prose paragraph carries a citation (`uncited_items` is empty).
 
 Stale stories, unknown dates and off-list domains are reported as **warnings**. They do not make the briefing fail.
 
@@ -371,7 +371,7 @@ The agent reads text written by strangers, so any article or feed item may try t
 **Reduces risk, but can be beaten:**
 
 - The `<untrusted_content>` fence and the system prompt's security rules rely on the model's judgement.
-- `find_injection_signs` is a blocklist. Paraphrases, other languages and Unicode tricks get past it, as the `hindi_instruction`, `reworded_request` and `zero_width` attacks show. It only flags content for the report and the model, except encoded payloads, which are withheld because they can make the API refuse the whole request. Links on allowed hosts are skipped by the encoded payload check, because Google News links look like encoded text, so a payload written inside a `news.google.com` URL still gets past it. Links to other hosts are checked.
+- `find_injection_signs` is a blocklist. Paraphrases, other languages and Unicode tricks get past it, as the `hindi_instruction`, `reworded_request` and `zero_width` attacks show. It only flags content for the report and the model, except encoded payloads, which are withheld because they can make the API refuse the whole request. Links on allowed hosts are skipped by the encoded payload check, because Google News links look like encoded text, so a payload written inside a `news.google.com` URL still gets past it. Links to other hosts are checked, but only a run that mixes capitals and lower case the way encoded text does counts, so ordinary long paths aren't withheld. In a test of 2,000 random encoded payloads written as URLs, 13 got past this.
 
 **Not solved:** a false claim can still reach the briefing, attributed to a real article, and the eval will pass it, because the eval checks where a claim came from and not whether it's true. A planted "correction" can't be reliably told apart from a genuine one.
 
@@ -435,7 +435,7 @@ The first live runs failed, and each failure was a real finding. Every fix lande
 ## Known Limitations
 
 - **Citations are checked for provenance, not accuracy.** The evals prove that every cited URL points to an article the agent actually fetched. They do not prove that the claim next to the citation is supported by that article. A bullet can cite a real, fetched article and still misstate what it says, and no check in `run_evals` would catch it.
-- **Headings need no citation.** Prose paragraphs must cite a URL, like bullets, but a claim written as a heading or a bold title (`## Iran seized a tanker`) still passes.
+- **Headings need no citation.** Prose paragraphs must cite a URL, like bullets, but a claim written as a heading, a bold title, a short line in capitals or a short line ending in a colon (`## Iran seized a tanker`) still passes. A closing line after the `FETCH NOTES:` section, such as "Let me know if you want more detail", makes the notes check fail, because the prompt says the notes must come last.
 - **The `FETCH NOTES:` check is a word list.** Every line of the notes must name a source or a step of the run, so a plain news claim there fails the briefing. A claim that also names its source, such as "The BBC article says the talks collapsed", still passes. In the other direction, a real fetch problem worded without any of the listed words makes the briefing fail, which errs on the safe side. Replayed on 98 saved real briefings (8 live runs and 90 attack suite runs), this check and the prose check changed no result.
 - **India-focused.** The prompt and the Google News feed are set up for India; briefings for other countries would need the prompt and feed query changed.
 - **The 5-article cap has a race.** Tool calls from a single model turn run in parallel, so if the model requests six fetches at once, all six can pass the `len(fetched) >= 5` check before any is recorded. A lock around check-and-reserve would close it.

@@ -28,8 +28,11 @@ UNSAFE_URL_CHARS = re.compile(r'[\\\s\x00-\x1f\x7f]')
 FETCH_NOTES_LINE = re.compile(rf'^[#*_ \t]*{re.escape(FETCH_NOTES_MARKER[:-1])}[*_ \t]*:', re.MULTILINE | re.IGNORECASE)
 LIST_ITEM_START = re.compile(r'^([-*•]|\d+\.)\s+')
 # A line that only labels what follows: a Markdown heading, a bold title with an optional
-# bracketed note, as in "**Today's briefing** (feeds dated 5 Nov)", or a horizontal rule.
-LABEL_LINE = re.compile(r'^(#{1,6}\s.*|\*\*[^*\n]+\*\*\s*(\([^()\n]*\))?\s*:?|[-*_=]{3,})$')
+# bracketed note, as in "**Today's briefing** (feeds dated 5 Nov)", a short line ending in a
+# colon ("Key developments:", "Here is your briefing:"), a short line in capitals, or a rule.
+LABEL_LINE = re.compile(
+    r"^(#{1,6}\s.*|\*\*[^*\n]+\*\*\s*(\([^()\n]*\))?\s*:?|[^\n]{1,80}:|[A-Z0-9 &'’,/()-]{3,60}|[-*_=]{3,})$"
+)
 # Fetch notes name a source or a step of the run. Every line of the notes must contain one of
 # these words, so a plain news claim there is caught. A claim that also names its source,
 # such as "The BBC article says the talks collapsed", still gets through.
@@ -56,6 +59,11 @@ INJECTION_SIGNS = {
 # These can make the API refuse the whole request, which would lose the briefing,
 # so this content is withheld from the model instead of only being flagged.
 WITHHELD_INJECTION_SIGNS = {"encoded payload"}
+URL_IN_TEXT = re.compile(r'https?://\S+')
+# 60 characters of base64 hold about 24 capitals and 24 lower case letters, and fewer than 12
+# of either is about a 1 in 1,000 chance. A URL path of capitalised words has one capital per
+# segment, so it would need 12 or more segments to reach this.
+MIXED_CASE_MINIMUM = 12
 
 def find_injection_signs(text: str) -> list[str]:
     """Checks fetched text for signs of a prompt injection attempt.
@@ -66,10 +74,28 @@ def find_injection_signs(text: str) -> list[str]:
     Returns:
         The labels of the signs found; empty if none.
     """
-    # Long links on allowed hosts, such as Google News links, would look like encoded payloads.
-    # Other URLs stay, so writing a payload as "http://..." doesn't hide it.
-    without_urls = re.sub(r'https?://\S+', lambda url: " " if is_allowed_domain(url.group(), DEFAULT_ALLOWED_DOMAINS) else url.group(), text)
+    without_urls = URL_IN_TEXT.sub(lambda url: url.group() if looks_encoded(url.group()) else " ", text)
     return [label for label, pattern in INJECTION_SIGNS.items() if pattern.search(without_urls)]
+
+def looks_encoded(url: str) -> bool:
+    """Checks whether a URL in fetched text hides an encoded payload.
+
+    Links on allowed hosts are trusted, because Google News links look like encoded text.
+    On other hosts, a long run only counts if it mixes capitals and lower case the way
+    encoded text does, so an ordinary long path such as /security-council/resolutions/2026 doesn't.
+
+    Args:
+        url: A URL found in fetched text.
+
+    Returns:
+        True if the URL should stay in the text for the encoded payload check.
+    """
+    if is_allowed_domain(url, DEFAULT_ALLOWED_DOMAINS):
+        return False
+    for run in INJECTION_SIGNS["encoded payload"].findall(url):
+        if sum(c.isupper() for c in run) >= MIXED_CASE_MINIMUM and sum(c.islower() for c in run) >= MIXED_CASE_MINIMUM:
+            return True
+    return False
 
 def normalize_url(url: str) -> str:
     """Strips the query string, fragment and trailing slashes, and lowercases the scheme and host.
