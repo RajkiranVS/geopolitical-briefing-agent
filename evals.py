@@ -24,15 +24,20 @@ REWORDED_PLACEHOLDER = re.compile(r"nothing(\s+(further|else|more))?(\s+to\s+rep
 UNSAFE_URL_CHARS = re.compile(r'[\\\s\x00-\x1f\x7f]')
 
 # The marker only counts at the start of its own line (Markdown wrappers allowed, any case).
-# Bold can close before the colon, as in **FETCH NOTES**:
-FETCH_NOTES_LINE = re.compile(rf'^[#*_ \t]*{re.escape(FETCH_NOTES_MARKER[:-1])}[*_ \t]*:', re.MULTILINE | re.IGNORECASE)
+# Bold can close before the colon, as in **FETCH NOTES**:, or after it, as in **FETCH NOTES:**
+FETCH_NOTES_LINE = re.compile(rf'^[#*_ \t]*{re.escape(FETCH_NOTES_MARKER[:-1])}[*_ \t]*:[*_ \t]*', re.MULTILINE | re.IGNORECASE)
 LIST_ITEM_START = re.compile(r'^([-*•]|\d+\.)\s+')
 # A line that only labels what follows: a Markdown heading, a bold title with an optional
 # bracketed note, as in "**Today's briefing** (feeds dated 5 Nov)", a short line ending in a
-# colon ("Key developments:", "Here is your briefing:"), a short line in capitals, or a rule.
+# colon ("Key developments:", "Here is your briefing:"), an intro with no numbers ("Here is
+# today's briefing."), a short line in capitals, or a rule. "Source:" isn't a label: it belongs
+# to the item before it.
 LABEL_LINE = re.compile(
-    r"^(#{1,6}\s.*|\*\*[^*\n]+\*\*\s*(\([^()\n]*\))?\s*:?|[^\n]{1,80}:|[A-Z0-9 &'’,/()-]{3,60}|[-*_=]{3,})$"
+    r"^(#{1,6}\s.*|\*\*[^*\n]+\*\*\s*(\([^()\n]*\))?\s*:?|(?!(?i:\(?sources?\b))[^\n]{1,120}:"
+    r"|(?i:here is|here's|below is|this is|this briefing)\b[^\d\n]{0,100}|[A-Z0-9 &'’,/()-]{3,60}|[-*_=]{3,})$"
 )
+# A citation in its own paragraph, as in "Source: https://...", belongs to the item before it.
+SOURCE_LINE = re.compile(r'^\(?\s*sources?\b', re.IGNORECASE)
 # Fetch notes name a source or a step of the run. Every line of the notes must contain one of
 # these words, so a plain news claim there is caught. A claim that also names its source,
 # such as "The BBC article says the talks collapsed", still gets through.
@@ -60,6 +65,8 @@ INJECTION_SIGNS = {
 # so this content is withheld from the model instead of only being flagged.
 WITHHELD_INJECTION_SIGNS = {"encoded payload"}
 URL_IN_TEXT = re.compile(r'https?://\S+')
+# Google News links are encoded article ids, so they always look like a payload.
+GOOGLE_NEWS_DOMAINS = ("news.google.com",)
 # 60 characters of base64 hold about 24 capitals and 24 lower case letters, and fewer than 12
 # of either is about a 1 in 1,000 chance. A URL path of capitalised words has one capital per
 # segment, so it would need 12 or more segments to reach this.
@@ -80,9 +87,10 @@ def find_injection_signs(text: str) -> list[str]:
 def looks_encoded(url: str) -> bool:
     """Checks whether a URL in fetched text hides an encoded payload.
 
-    Links on allowed hosts are trusted, because Google News links look like encoded text.
-    On other hosts, a long run only counts if it mixes capitals and lower case the way
-    encoded text does, so an ordinary long path such as /security-council/resolutions/2026 doesn't.
+    Google News links are skipped, because their article ids look like encoded text. On every
+    other host, including the other allowed ones, a long run only counts if it mixes capitals
+    and lower case the way encoded text does, so an ordinary long path such as
+    /security-council/resolutions/2026 doesn't.
 
     Args:
         url: A URL found in fetched text.
@@ -90,7 +98,7 @@ def looks_encoded(url: str) -> bool:
     Returns:
         True if the URL should stay in the text for the encoded payload check.
     """
-    if is_allowed_domain(url, DEFAULT_ALLOWED_DOMAINS):
+    if is_allowed_domain(url, GOOGLE_NEWS_DOMAINS):
         return False
     for run in INJECTION_SIGNS["encoded payload"].findall(url):
         if sum(c.isupper() for c in run) >= MIXED_CASE_MINIMUM and sum(c.islower() for c in run) >= MIXED_CASE_MINIMUM:
@@ -243,6 +251,10 @@ def check_uncited_items(briefing: str) -> list[str]:
         # end the item and need no citation
         elif not stripped or LABEL_LINE.match(stripped) or is_notes_marker_line(stripped):
             save_current()
+
+        # A citation in its own paragraph belongs to the item before it
+        elif not current_item and items and SOURCE_LINE.match(stripped):
+            items[-1] += " " + stripped
 
         # 3. Anything else continues the open item, or starts a prose paragraph, which needs a citation too
         else:
@@ -436,7 +448,7 @@ def run_evals(briefing: str, fetched: dict[str, str], headline_meta: dict[str, s
     print(f"Status: {'[PASSED]' if passed else '[FAILED]'}")
     print(f"Verified Citations: {len(verified)}")
     print(f"Cited but not read: {len(unverified)}")
-    print(f"Uncited Bullet Items Found: {len(uncited_items)}")
+    print(f"Uncited items and paragraphs: {len(uncited_items)}")
     print(f"Stale news warnings (>72h): {len(stale)}")
     print(f"Unknown publish date warnings: {len(unknown_date)}")
     print(f"Out of Bounds Domains: {len(off_list)}")
