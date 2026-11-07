@@ -46,7 +46,7 @@ SOURCE_LINE = re.compile(r'^\(?\s*sources?\s*:\s*(\[[^\]\n]{1,40}\]\()?https?://
 # such as "The BBC article says the talks collapsed", still gets through.
 FETCH_PROBLEM_WORDS = re.compile(
     r'\b(feeds?|fetch\w*|articles?|headlines?|links?|instructions?|ignored|redirect\w*|briefing|'
-    r'summari[sz]\w*|items?|loaded|retrieved|retry|retried|withheld|none)\b',
+    r'summari[sz]\w*|items?|loaded|retrieved|retry|retried|withheld|none|no\s+(issues|problems|errors))\b',
     re.IGNORECASE,
 )
 
