@@ -311,6 +311,20 @@ def test_real_fetch_notes_wording_accepted():
     )
     assert check_uncited_items(f"## Asia\n- Leaders met. Source: https://www.thehindu.com/news/article1.ece\n\n{notes}") == []
 
+def test_notes_saying_there_were_no_problems_accepted():
+    """Checks that notes reporting no problems, without naming a feed, don't fail the briefing."""
+    # Regression: found in review. "No issues." has none of the run words, so a correct briefing failed.
+    for line in ("- No issues.", "- No problems to report.", "No errors.", "- No issue.", "- **No problems found.**"):
+        briefing = f"## Asia\n- Leaders met. Source: https://www.thehindu.com/news/article1.ece\n\nFETCH NOTES:\n{line}\n"
+        assert check_uncited_items(briefing) == [], line
+
+def test_problems_without_no_in_notes_is_still_flagged():
+    """Checks that the word "problems" alone doesn't let a news claim through the notes."""
+    # Regression: found in review. Matching "no problems" anywhere in the line let this claim through.
+    for item in ("- Iran faced problems at the border crossing.", "- Iran faced no problems at the border crossing."):
+        briefing = f"## Asia\n- Leaders met. Source: https://www.thehindu.com/news/article1.ece\n\nFETCH NOTES:\n{item}\n"
+        assert item in check_uncited_items(briefing), item
+
 def test_fetch_notes_marker_with_bold_closing_before_colon_accepted():
     """Checks that a marker with the bold closing before the colon is recognised."""
     # Regression: only a marker with the colon inside the bold was recognised.
