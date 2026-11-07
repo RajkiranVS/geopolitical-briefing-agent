@@ -292,6 +292,8 @@ pytest -k fresh   # run only the freshness tests
 ruff check .     # lint, including docstring style
 ```
 
+CI fails if `ruff` reports anything. It pins `ruff` to 0.17.3, because the docstring rules in [`ruff.toml`](ruff.toml) are preview rules that can change between releases. Use the same version locally (`pip install ruff==0.17.3`) to get the same results.
+
 Every module, class and function has a Google style docstring, with `Args`, `Returns` and `Raises` sections where they apply. Two checks work together, because neither covers everything:
 
 - `ruff` ([`ruff.toml`](ruff.toml)) checks the style, flags an argument missing from an `Args` section, and flags a missing `Returns` section or an exception missing from `Raises`. It doesn't notice a function with no `Args` section at all, and it doesn't require docstrings on nested functions.
@@ -307,7 +309,7 @@ The docstrings of `get_headlines` and `fetch_article` are also the tool descript
 
 | Job | What it does | Fails the build when |
 |-----|--------------|----------------------|
-| `tests` (push to `main`, PRs, manual) | Byte-compiles every module, runs `ruff` (informational only) and runs `pytest` on Python 3.10 and 3.12. | Compilation or any test fails |
+| `tests` (push to `main`, PRs, manual) | Byte-compiles every module, runs `ruff` and runs `pytest` on Python 3.10 and 3.12. | Compilation fails, `ruff` reports a problem, or any test fails |
 | `claude-evaluation` (PRs and manual only) | Runs Claude Code in headless mode (`claude -p`) with the prompt in [`.github/claude/review-prompt.md`](.github/claude/review-prompt.md). Claude reads the whole repo, runs pytest, compileall, ruff and pip-audit, and can write throwaway probe tests to confirm suspected bugs. It then scores nine dimensions: correctness, agent design, security, eval quality, tests, code quality, dependencies, docs accuracy and CI. Never: the verdict is reported as a warning, because an LLM's verdict can vary between runs on the same code |
 
 Claude can use these tools: `Read`, `Glob`, `Grep`, `Write` and `TodoWrite`, plus a Bash allow-list for pytest, compileall, ruff, pip-audit, pip, read-only git commands, `ls` and `wc`. `Edit` and web access are blocked. Claude is told not to run the agent script, because that would make live API and network calls.
