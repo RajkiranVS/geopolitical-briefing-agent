@@ -24,13 +24,31 @@ REWORDED_PLACEHOLDER = re.compile(r"nothing(\s+(further|else|more))?(\s+to\s+rep
 UNSAFE_URL_CHARS = re.compile(r'[\\\s\x00-\x1f\x7f]')
 
 # The marker only counts at the start of its own line (Markdown wrappers allowed, any case).
-# Bold can close before the colon, as in **FETCH NOTES**:
-FETCH_NOTES_LINE = re.compile(rf'^[#*_ \t]*{re.escape(FETCH_NOTES_MARKER[:-1])}[*_ \t]*:', re.MULTILINE | re.IGNORECASE)
-# A Markdown heading, or a line that is entirely bold.
-SECTION_HEADING_LINE = re.compile(r'^[ \t]*(#{1,6}[ \t]|\*\*[^*\n]+\*\*:?[ \t]*$)', re.MULTILINE)
+# Bold can close before the colon, as in **FETCH NOTES**:, or after it, as in **FETCH NOTES:**
+FETCH_NOTES_LINE = re.compile(rf'^[#*_ \t]*{re.escape(FETCH_NOTES_MARKER[:-1])}[*_ \t]*:[*_ \t]*', re.MULTILINE | re.IGNORECASE)
 LIST_ITEM_START = re.compile(r'^([-*•]|\d+\.)\s+')
-# The prompt tells the agent to name the failing source, e.g. "BBC feed".
-FETCH_PROBLEM_WORDS = re.compile(r'\b(feeds?|fetch|fetched|fetches|fetching)\b', re.IGNORECASE)
+# Lines that only label what follows. Markup labels are a Markdown heading, a bold title with an
+# optional bracketed note, as in "**Today's briefing** (feeds dated 5 Nov)", or a rule.
+MARKUP_LABEL_LINE = re.compile(r"^(#{1,6}\s.*|\*\*[^*\n]+\*\*\s*(\([^()\n]*\))?\s*:?|[-*_=]{3,})$")
+# Text labels are a line of up to 120 characters ending in a colon ("Key developments:"), an
+# intro with no numbers ("Here is today's briefing.") or a short line in capitals. They only count
+# between items, because inside a bullet the same line is a wrapped continuation. "Source:" is
+# never a label: it belongs to the item before it.
+TEXT_LABEL_LINE = re.compile(
+    r"^((?!(?i:\(?sources?\b))[^\n]{1,120}:"
+    r"|(?i:here is|here's|below is|this is|this briefing)\b[^\d\n]{0,100}|[A-Z0-9 &'’,/()-]{3,60})$"
+)
+# A paragraph that is only a citation, as in "Source: https://...", belongs to the item before it.
+# It must hold nothing but the label and one link, so it can't carry a claim of its own.
+SOURCE_LINE = re.compile(r'^\(?\s*sources?\s*:\s*(\[[^\]\n]{1,40}\]\()?https?://\S+\s*$', re.IGNORECASE)
+# Fetch notes name a source or a step of the run. Every line of the notes must contain one of
+# these words, so a plain news claim there is caught. A claim that also names its source,
+# such as "The BBC article says the talks collapsed", still gets through.
+FETCH_PROBLEM_WORDS = re.compile(
+    r'\b(feeds?|fetch\w*|articles?|headlines?|links?|instructions?|ignored|redirect\w*|briefing|'
+    r'summari[sz]\w*|items?|loaded|retrieved|retry|retried|withheld|none)\b',
+    re.IGNORECASE,
+)
 
 # A tripwire, not a guarantee: a blocklist of text that addresses the reading model instead of
 # a human reader. Paraphrases, other languages and Unicode tricks get past it, and ordinary news
@@ -49,6 +67,13 @@ INJECTION_SIGNS = {
 # These can make the API refuse the whole request, which would lose the briefing,
 # so this content is withheld from the model instead of only being flagged.
 WITHHELD_INJECTION_SIGNS = {"encoded payload"}
+URL_IN_TEXT = re.compile(r'https?://\S+')
+# Google News links are encoded article ids, so they always look like a payload.
+GOOGLE_NEWS_DOMAINS = ("news.google.com",)
+# 60 characters of base64 hold about 24 capitals and 24 lower case letters, and fewer than 12
+# of either is about a 1 in 1,000 chance. A URL path of capitalised words has one capital per
+# segment, so it would need 12 or more segments to reach this.
+MIXED_CASE_MINIMUM = 12
 
 def find_injection_signs(text: str) -> list[str]:
     """Checks fetched text for signs of a prompt injection attempt.
@@ -59,9 +84,29 @@ def find_injection_signs(text: str) -> list[str]:
     Returns:
         The labels of the signs found; empty if none.
     """
-    # Long URLs, such as Google News links, would look like encoded payloads
-    without_urls = re.sub(r'https?://\S+', ' ', text)
+    without_urls = URL_IN_TEXT.sub(lambda url: url.group() if looks_encoded(url.group()) else " ", text)
     return [label for label, pattern in INJECTION_SIGNS.items() if pattern.search(without_urls)]
+
+def looks_encoded(url: str) -> bool:
+    """Checks whether a URL in fetched text hides an encoded payload.
+
+    Google News links are skipped, because their article ids look like encoded text. On every
+    other host, including the other allowed ones, a long run only counts if it mixes capitals
+    and lower case the way encoded text does, so an ordinary long path such as
+    /security-council/resolutions/2026 doesn't.
+
+    Args:
+        url: A URL found in fetched text.
+
+    Returns:
+        True if the URL should stay in the text for the encoded payload check.
+    """
+    if is_allowed_domain(url, GOOGLE_NEWS_DOMAINS):
+        return False
+    for run in INJECTION_SIGNS["encoded payload"].findall(url):
+        if sum(c.isupper() for c in run) >= MIXED_CASE_MINIMUM and sum(c.islower() for c in run) >= MIXED_CASE_MINIMUM:
+            return True
+    return False
 
 def normalize_url(url: str) -> str:
     """Strips the query string, fragment and trailing slashes, and lowercases the scheme and host.
@@ -127,28 +172,39 @@ def check_cited_were_fetched(cited: list[str], fetched: dict[str, str]) -> tuple
     return verified, unverified
 
 def only_describes_fetch_problems(notes: str) -> bool:
-    """Checks that every list item in the notes names a feed or fetch problem, or is "none".
+    """Checks that every line of the notes names a source or a step of the run, or is "none".
 
     Args:
         notes: The text after the fetch notes marker.
 
     Returns:
-        True if no list item looks like a news claim.
+        True if no line looks like a news claim.
     """
     for line in notes.splitlines():
         stripped = line.strip()
-        if not LIST_ITEM_START.match(stripped):
+        if not stripped or MARKUP_LABEL_LINE.match(stripped) or TEXT_LABEL_LINE.match(stripped):
             continue
-        item_text = LIST_ITEM_START.sub('', stripped).strip(' *_.').lower()
-        if item_text != "none" and not FETCH_PROBLEM_WORDS.search(item_text):
+        if not FETCH_PROBLEM_WORDS.search(LIST_ITEM_START.sub('', stripped)):
             return False
     return True
+
+def is_notes_marker_line(line: str) -> bool:
+    """Checks whether a line is a fetch notes marker followed only by a description of the run.
+
+    Args:
+        line: One line of the briefing, without surrounding whitespace.
+
+    Returns:
+        True for a line such as "FETCH NOTES: none", False for any other line.
+    """
+    marker = FETCH_NOTES_LINE.match(line)
+    return bool(marker) and only_describes_fetch_problems(line[marker.end():].strip(" *_"))
 
 def strip_fetch_notes(briefing: str) -> str:
     """Removes the fetch notes from the briefing, but only if they are its last section.
 
-    A heading after the marker starts a new section, and nothing is removed, unless
-    every list item after the marker describes a feed or fetch problem.
+    Nothing is removed unless every line after the marker describes the run, so a news
+    claim placed in the notes, or in a section after them, is still checked.
 
     Args:
         briefing: The text briefing content.
@@ -160,16 +216,15 @@ def strip_fetch_notes(briefing: str) -> str:
     if not markers:
         return briefing
     last_marker = markers[-1]
-    notes = briefing[last_marker.end():]
-    if SECTION_HEADING_LINE.search(briefing, last_marker.end()) and not only_describes_fetch_problems(notes):
+    if not only_describes_fetch_problems(briefing[last_marker.end():]):
         return briefing
     return briefing[:last_marker.start()]
 
 def check_uncited_items(briefing: str) -> list[str]:
-    """Flags list items that have no URL citation and aren't an empty-section placeholder.
+    """Flags list items and prose paragraphs that have no URL citation and aren't a placeholder.
 
-    Items are grouped across line continuations. A final FETCH_NOTES_MARKER section is
-    ignored (see strip_fetch_notes).
+    Items are grouped across line continuations. Headings, bold titles and horizontal rules
+    need no citation. A final FETCH_NOTES_MARKER section is ignored (see strip_fetch_notes).
 
     Args:
         briefing: The text briefing content to validate.
@@ -186,22 +241,43 @@ def check_uncited_items(briefing: str) -> list[str]:
             items.append(" ".join(current_item))
             current_item.clear()
 
+    # A citation paragraph may only join the item just before it, with nothing but blank lines between
+    can_join_previous = False
     lines = strip_fetch_notes(briefing).splitlines()
     for line in lines:
         stripped = line.strip()
-        
+
         # 1. Check for bullet or numbered list indicators
         if LIST_ITEM_START.match(stripped):
             save_current()
             current_item.append(stripped)
-            
-        # 2. Check for markdown headings or paragraph breaks
-        elif stripped.startswith("##") or not stripped:
-            save_current()
-            
-        # 3. Handle continuation lines if an item tracker is currently open
-        elif current_item:
+            can_join_previous = False
+
+        # 2. A paragraph break ends the item
+        elif not stripped:
+            if current_item:
+                save_current()
+                can_join_previous = True
+
+        # 3. Inside an item, only a Markdown heading or a marker line ends it. Bold text, rules
+        # and lines ending in a colon are part of the item.
+        elif current_item and not stripped.startswith("#") and not is_notes_marker_line(stripped):
             current_item.append(stripped)
+
+        # 4. Between items, labels and a marker line such as "FETCH NOTES: none" need no citation
+        elif MARKUP_LABEL_LINE.match(stripped) or TEXT_LABEL_LINE.match(stripped) or is_notes_marker_line(stripped):
+            save_current()
+            can_join_previous = False
+
+        # 5. A citation in its own paragraph belongs to the item just before it
+        elif can_join_previous and SOURCE_LINE.match(stripped):
+            items[-1] += " " + stripped
+            can_join_previous = False
+
+        # 6. Anything else starts a prose paragraph, which needs a citation too
+        else:
+            current_item.append(stripped)
+            can_join_previous = False
 
     # Save the final residual item block if one remains open
     save_current()
@@ -391,7 +467,7 @@ def run_evals(briefing: str, fetched: dict[str, str], headline_meta: dict[str, s
     print(f"Status: {'[PASSED]' if passed else '[FAILED]'}")
     print(f"Verified Citations: {len(verified)}")
     print(f"Cited but not read: {len(unverified)}")
-    print(f"Uncited Bullet Items Found: {len(uncited_items)}")
+    print(f"Uncited items and paragraphs: {len(uncited_items)}")
     print(f"Stale news warnings (>72h): {len(stale)}")
     print(f"Unknown publish date warnings: {len(unknown_date)}")
     print(f"Out of Bounds Domains: {len(off_list)}")
