@@ -27,17 +27,20 @@ UNSAFE_URL_CHARS = re.compile(r'[\\\s\x00-\x1f\x7f]')
 # Bold can close before the colon, as in **FETCH NOTES**:, or after it, as in **FETCH NOTES:**
 FETCH_NOTES_LINE = re.compile(rf'^[#*_ \t]*{re.escape(FETCH_NOTES_MARKER[:-1])}[*_ \t]*:[*_ \t]*', re.MULTILINE | re.IGNORECASE)
 LIST_ITEM_START = re.compile(r'^([-*•]|\d+\.)\s+')
-# A line that only labels what follows: a Markdown heading, a bold title with an optional
-# bracketed note, as in "**Today's briefing** (feeds dated 5 Nov)", a short line ending in a
-# colon ("Key developments:", "Here is your briefing:"), an intro with no numbers ("Here is
-# today's briefing."), a short line in capitals, or a rule. "Source:" isn't a label: it belongs
-# to the item before it.
-LABEL_LINE = re.compile(
-    r"^(#{1,6}\s.*|\*\*[^*\n]+\*\*\s*(\([^()\n]*\))?\s*:?|(?!(?i:\(?sources?\b))[^\n]{1,120}:"
-    r"|(?i:here is|here's|below is|this is|this briefing)\b[^\d\n]{0,100}|[A-Z0-9 &'’,/()-]{3,60}|[-*_=]{3,})$"
+# Lines that only label what follows. Markup labels are a Markdown heading, a bold title with an
+# optional bracketed note, as in "**Today's briefing** (feeds dated 5 Nov)", or a rule.
+MARKUP_LABEL_LINE = re.compile(r"^(#{1,6}\s.*|\*\*[^*\n]+\*\*\s*(\([^()\n]*\))?\s*:?|[-*_=]{3,})$")
+# Text labels are a line of up to 120 characters ending in a colon ("Key developments:"), an
+# intro with no numbers ("Here is today's briefing.") or a short line in capitals. They only count
+# between items, because inside a bullet the same line is a wrapped continuation. "Source:" is
+# never a label: it belongs to the item before it.
+TEXT_LABEL_LINE = re.compile(
+    r"^((?!(?i:\(?sources?\b))[^\n]{1,120}:"
+    r"|(?i:here is|here's|below is|this is|this briefing)\b[^\d\n]{0,100}|[A-Z0-9 &'’,/()-]{3,60})$"
 )
-# A citation in its own paragraph, as in "Source: https://...", belongs to the item before it.
-SOURCE_LINE = re.compile(r'^\(?\s*sources?\b', re.IGNORECASE)
+# A paragraph that is only a citation, as in "Source: https://...", belongs to the item before it.
+# It must hold nothing but the label and one link, so it can't carry a claim of its own.
+SOURCE_LINE = re.compile(r'^\(?\s*sources?\s*:\s*(\[[^\]\n]{1,40}\]\()?https?://\S+\s*$', re.IGNORECASE)
 # Fetch notes name a source or a step of the run. Every line of the notes must contain one of
 # these words, so a plain news claim there is caught. A claim that also names its source,
 # such as "The BBC article says the talks collapsed", still gets through.
@@ -179,7 +182,7 @@ def only_describes_fetch_problems(notes: str) -> bool:
     """
     for line in notes.splitlines():
         stripped = line.strip()
-        if not stripped or LABEL_LINE.match(stripped):
+        if not stripped or MARKUP_LABEL_LINE.match(stripped) or TEXT_LABEL_LINE.match(stripped):
             continue
         if not FETCH_PROBLEM_WORDS.search(LIST_ITEM_START.sub('', stripped)):
             return False
@@ -249,7 +252,12 @@ def check_uncited_items(briefing: str) -> list[str]:
             
         # 2. Headings, titles, rules, paragraph breaks and a marker line such as "FETCH NOTES: none"
         # end the item and need no citation
-        elif not stripped or LABEL_LINE.match(stripped) or is_notes_marker_line(stripped):
+        elif (
+            not stripped
+            or MARKUP_LABEL_LINE.match(stripped)
+            or (not current_item and TEXT_LABEL_LINE.match(stripped))
+            or is_notes_marker_line(stripped)
+        ):
             save_current()
 
         # A citation in its own paragraph belongs to the item before it

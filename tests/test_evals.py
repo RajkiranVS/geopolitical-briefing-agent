@@ -647,5 +647,23 @@ def test_intro_sentences_and_separate_source_lines_pass():
         ),
         f"Leaders met in Delhi to discuss trade.\n\nSource: {url}\n",
         f"- Leaders met in Delhi to discuss trade.\nSource:\n{url}\n",
+        f"Leaders met in Delhi to discuss trade.\n\nSource: [The Hindu]({url})\n",
     ):
         assert check_uncited_items(briefing) == [], briefing
+
+def test_source_paragraph_cannot_carry_a_claim():
+    """Checks that a paragraph starting with "Sources" only counts as a citation if it is one."""
+    # Regression: found in review. Any paragraph starting "Source" was joined to the cited item before it.
+    url = "https://www.thehindu.com/news/article1.ece"
+    item = "Sources say Iran seized a tanker in the Gulf."
+    assert check_uncited_items(f"- Leaders met in Delhi. Source: {url}\n\n{item}\n") == [item]
+
+def test_wrapped_bullet_line_ending_in_a_colon_stays_in_the_bullet():
+    """Checks that a continuation line ending in a colon doesn't split its bullet."""
+    # Regression: found in review. The line was read as a label, so the bullet lost its citation.
+    briefing = (
+        "- Ministers met in Delhi on Tuesday and said\n"
+        "  that three points were agreed:\n"
+        "  tariffs, transit and visas. Source: https://www.thehindu.com/news/article1.ece\n"
+    )
+    assert check_uncited_items(briefing) == []
