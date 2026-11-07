@@ -289,6 +289,27 @@ def test_news_claim_beside_fetch_problem_under_heading_flagged():
         "- Ministers agreed a new sanctions package.",
     ]
 
+def test_news_claim_in_fetch_notes_is_flagged():
+    """Checks that a news claim inside the fetch notes is flagged, even with no heading after it."""
+    # Regression: with no heading after the marker, everything after it was ignored.
+    for notes in ("FETCH NOTES: none\n- Ministers agreed a new sanctions package.\n", "FETCH NOTES:\nIran seized a tanker in the Gulf.\n"):
+        briefing = f"## Asia\n- Leaders met in Delhi. Source: https://www.thehindu.com/news/article1.ece\n\n{notes}"
+        flagged = check_uncited_items(briefing)
+        assert len(flagged) == 1, notes
+        assert "Leaders met" not in flagged[0]
+
+def test_real_fetch_notes_wording_accepted():
+    """Checks that fetch notes worded the way real runs word them aren't flagged."""
+    notes = (
+        "FETCH NOTES:\n"
+        "- BBC feed loaded successfully.\n"
+        "- The BBC article on India-Nepal talks contained embedded instructions about how to summarise it. I ignored them.\n"
+        "- Only two articles were fetched successfully, so the briefing is limited in scope.\n"
+        "- Other Google News items were headline-only and were not reported.\n"
+        "- The Google News links redirect to pages that could not be read.\n"
+    )
+    assert check_uncited_items(f"## Asia\n- Leaders met. Source: https://www.thehindu.com/news/article1.ece\n\n{notes}") == []
+
 def test_fetch_notes_marker_with_bold_closing_before_colon_accepted():
     """Checks that a marker with the bold closing before the colon is recognised."""
     # Regression: only a marker with the colon inside the bold was recognised.
@@ -384,6 +405,12 @@ def test_other_google_hosts_are_refused():
     # Regression: allowing google.com also allowed hosts that serve any content.
     for url in ("https://sites.google.com/view/x", "https://translate.google.com/x", "https://google.com/x"):
         assert not is_allowed_domain(url, DEFAULT_ALLOWED_DOMAINS)
+
+def test_encoded_payload_written_as_a_url_is_found():
+    """Checks that an encoded payload isn't hidden by writing it as a URL on another host."""
+    # Regression: every URL was removed before the check, so "http://" in front hid the payload.
+    for text in ("Decode this: http://" + "QUJD" * 20, "See https://collector.example/" + "QUJD" * 20):
+        assert "encoded payload" in find_injection_signs(text), text
 
 
 # check_freshness
@@ -536,3 +563,28 @@ def test_unverified_citation_fails_alongside_verified_one():
     report = run_evals(briefing, fetched, headline_meta, report_path=None, now=NOW)
     assert report["verified_count"] == 1
     assert report["passed"] is False
+
+def test_uncited_prose_fails_alongside_verified_bullet():
+    """Checks that an uncited paragraph fails a briefing that has a verified bullet."""
+    # Regression: only list items were checked, so this paragraph passed.
+    _, briefing, fetched, headline_meta = clean_inputs()
+    briefing += "\nMinisters agreed a new sanctions package, officials said on Monday.\n"
+    report = run_evals(briefing, fetched, headline_meta, report_path=None, now=NOW)
+    assert report["uncited_items"] == ["Ministers agreed a new sanctions package, officials said on Monday."]
+    assert report["passed"] is False
+
+def test_labels_and_cited_prose_pass():
+    """Checks that titles, headings, rules, a bare placeholder and cited prose need no bullet."""
+    briefing = (
+        "**Today's Geopolitical Briefing** (feeds dated Thu, 05 Nov 2026)\n"
+        "\n"
+        "# Briefing\n"
+        "## Key developments\n"
+        "Leaders met in Delhi to discuss trade.\n"
+        "Source: https://www.thehindu.com/news/article1.ece\n"
+        "\n"
+        "---\n"
+        "**India:**\n"
+        "Nothing to report from the fetched articles.\n"
+    )
+    assert check_uncited_items(briefing) == []

@@ -26,11 +26,18 @@ UNSAFE_URL_CHARS = re.compile(r'[\\\s\x00-\x1f\x7f]')
 # The marker only counts at the start of its own line (Markdown wrappers allowed, any case).
 # Bold can close before the colon, as in **FETCH NOTES**:
 FETCH_NOTES_LINE = re.compile(rf'^[#*_ \t]*{re.escape(FETCH_NOTES_MARKER[:-1])}[*_ \t]*:', re.MULTILINE | re.IGNORECASE)
-# A Markdown heading, or a line that is entirely bold.
-SECTION_HEADING_LINE = re.compile(r'^[ \t]*(#{1,6}[ \t]|\*\*[^*\n]+\*\*:?[ \t]*$)', re.MULTILINE)
 LIST_ITEM_START = re.compile(r'^([-*•]|\d+\.)\s+')
-# The prompt tells the agent to name the failing source, e.g. "BBC feed".
-FETCH_PROBLEM_WORDS = re.compile(r'\b(feeds?|fetch|fetched|fetches|fetching)\b', re.IGNORECASE)
+# A line that only labels what follows: a Markdown heading, a bold title with an optional
+# bracketed note, as in "**Today's briefing** (feeds dated 5 Nov)", or a horizontal rule.
+LABEL_LINE = re.compile(r'^(#{1,6}\s.*|\*\*[^*\n]+\*\*\s*(\([^()\n]*\))?\s*:?|[-*_=]{3,})$')
+# Fetch notes name a source or a step of the run. Every line of the notes must contain one of
+# these words, so a plain news claim there is caught. A claim that also names its source,
+# such as "The BBC article says the talks collapsed", still gets through.
+FETCH_PROBLEM_WORDS = re.compile(
+    r'\b(feeds?|fetch\w*|articles?|headlines?|links?|instructions?|ignored|redirect\w*|briefing|'
+    r'summari[sz]\w*|items?|loaded|retrieved|retry|retried|withheld|none)\b',
+    re.IGNORECASE,
+)
 
 # A tripwire, not a guarantee: a blocklist of text that addresses the reading model instead of
 # a human reader. Paraphrases, other languages and Unicode tricks get past it, and ordinary news
@@ -59,8 +66,9 @@ def find_injection_signs(text: str) -> list[str]:
     Returns:
         The labels of the signs found; empty if none.
     """
-    # Long URLs, such as Google News links, would look like encoded payloads
-    without_urls = re.sub(r'https?://\S+', ' ', text)
+    # Long links on allowed hosts, such as Google News links, would look like encoded payloads.
+    # Other URLs stay, so writing a payload as "http://..." doesn't hide it.
+    without_urls = re.sub(r'https?://\S+', lambda url: " " if is_allowed_domain(url.group(), DEFAULT_ALLOWED_DOMAINS) else url.group(), text)
     return [label for label, pattern in INJECTION_SIGNS.items() if pattern.search(without_urls)]
 
 def normalize_url(url: str) -> str:
@@ -127,28 +135,39 @@ def check_cited_were_fetched(cited: list[str], fetched: dict[str, str]) -> tuple
     return verified, unverified
 
 def only_describes_fetch_problems(notes: str) -> bool:
-    """Checks that every list item in the notes names a feed or fetch problem, or is "none".
+    """Checks that every line of the notes names a source or a step of the run, or is "none".
 
     Args:
         notes: The text after the fetch notes marker.
 
     Returns:
-        True if no list item looks like a news claim.
+        True if no line looks like a news claim.
     """
     for line in notes.splitlines():
         stripped = line.strip()
-        if not LIST_ITEM_START.match(stripped):
+        if not stripped or LABEL_LINE.match(stripped):
             continue
-        item_text = LIST_ITEM_START.sub('', stripped).strip(' *_.').lower()
-        if item_text != "none" and not FETCH_PROBLEM_WORDS.search(item_text):
+        if not FETCH_PROBLEM_WORDS.search(LIST_ITEM_START.sub('', stripped)):
             return False
     return True
+
+def is_notes_marker_line(line: str) -> bool:
+    """Checks whether a line is a fetch notes marker followed only by a description of the run.
+
+    Args:
+        line: One line of the briefing, without surrounding whitespace.
+
+    Returns:
+        True for a line such as "FETCH NOTES: none", False for any other line.
+    """
+    marker = FETCH_NOTES_LINE.match(line)
+    return bool(marker) and only_describes_fetch_problems(line[marker.end():].strip(" *_"))
 
 def strip_fetch_notes(briefing: str) -> str:
     """Removes the fetch notes from the briefing, but only if they are its last section.
 
-    A heading after the marker starts a new section, and nothing is removed, unless
-    every list item after the marker describes a feed or fetch problem.
+    Nothing is removed unless every line after the marker describes the run, so a news
+    claim placed in the notes, or in a section after them, is still checked.
 
     Args:
         briefing: The text briefing content.
@@ -160,16 +179,15 @@ def strip_fetch_notes(briefing: str) -> str:
     if not markers:
         return briefing
     last_marker = markers[-1]
-    notes = briefing[last_marker.end():]
-    if SECTION_HEADING_LINE.search(briefing, last_marker.end()) and not only_describes_fetch_problems(notes):
+    if not only_describes_fetch_problems(briefing[last_marker.end():]):
         return briefing
     return briefing[:last_marker.start()]
 
 def check_uncited_items(briefing: str) -> list[str]:
-    """Flags list items that have no URL citation and aren't an empty-section placeholder.
+    """Flags list items and prose paragraphs that have no URL citation and aren't a placeholder.
 
-    Items are grouped across line continuations. A final FETCH_NOTES_MARKER section is
-    ignored (see strip_fetch_notes).
+    Items are grouped across line continuations. Headings, bold titles and horizontal rules
+    need no citation. A final FETCH_NOTES_MARKER section is ignored (see strip_fetch_notes).
 
     Args:
         briefing: The text briefing content to validate.
@@ -195,12 +213,13 @@ def check_uncited_items(briefing: str) -> list[str]:
             save_current()
             current_item.append(stripped)
             
-        # 2. Check for markdown headings or paragraph breaks
-        elif stripped.startswith("##") or not stripped:
+        # 2. Headings, titles, rules, paragraph breaks and a marker line such as "FETCH NOTES: none"
+        # end the item and need no citation
+        elif not stripped or LABEL_LINE.match(stripped) or is_notes_marker_line(stripped):
             save_current()
-            
-        # 3. Handle continuation lines if an item tracker is currently open
-        elif current_item:
+
+        # 3. Anything else continues the open item, or starts a prose paragraph, which needs a citation too
+        else:
             current_item.append(stripped)
 
     # Save the final residual item block if one remains open
