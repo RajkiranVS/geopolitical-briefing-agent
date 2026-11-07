@@ -46,9 +46,12 @@ SOURCE_LINE = re.compile(r'^\(?\s*sources?\s*:\s*(\[[^\]\n]{1,40}\]\()?https?://
 # such as "The BBC article says the talks collapsed", still gets through.
 FETCH_PROBLEM_WORDS = re.compile(
     r'\b(feeds?|fetch\w*|articles?|headlines?|links?|instructions?|ignored|redirect\w*|briefing|'
-    r'summari[sz]\w*|items?|loaded|retrieved|retry|retried|withheld|none|no\s+(issues|problems|errors))\b',
+    r'summari[sz]\w*|items?|loaded|retrieved|retry|retried|withheld|none)\b',
     re.IGNORECASE,
 )
+# A notes line that only says nothing went wrong, as in "No issues." It must be the whole line,
+# so a claim such as "Iran faced no problems at the border" isn't accepted.
+NO_PROBLEMS_LINE = re.compile(r'no\s+(issues?|problems?|errors?)(\s+(to\s+report|found|encountered))?', re.IGNORECASE)
 
 # A tripwire, not a guarantee: a blocklist of text that addresses the reading model instead of
 # a human reader. Paraphrases, other languages and Unicode tricks get past it, and ordinary news
@@ -184,7 +187,8 @@ def only_describes_fetch_problems(notes: str) -> bool:
         stripped = line.strip()
         if not stripped or MARKUP_LABEL_LINE.match(stripped) or TEXT_LABEL_LINE.match(stripped):
             continue
-        if not FETCH_PROBLEM_WORDS.search(LIST_ITEM_START.sub('', stripped)):
+        line_text = LIST_ITEM_START.sub('', stripped)
+        if not FETCH_PROBLEM_WORDS.search(line_text) and not NO_PROBLEMS_LINE.fullmatch(line_text.strip(' *_.!')):
             return False
     return True
 
