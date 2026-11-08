@@ -29,8 +29,9 @@ class SubmitBriefing(BaseModel):
         description="3 to 5 key developments, each from an article you fetched. Fewer if fewer were fetched."
     )
     india: list[BriefingItem] = Field(
-        description="Developments affecting India, each from an article you fetched. Don't repeat an item "
-        "from key_developments. Empty if none of the fetched articles affects India."
+        description="Developments affecting India, each from an article you fetched. Each development goes in "
+        "one section only: one that affects India goes here and not also in key_developments. Empty if none "
+        "of the fetched articles affects India."
     )
     fetch_notes: list[str] = Field(
         description="One short note per feed or fetch problem, naming the source (such as \"BBC feed\") "

@@ -38,6 +38,19 @@ FETCH_PROBLEM_WORDS = re.compile(
 # claim such as "Iran faced no problems at the border" isn't accepted.
 NO_PROBLEMS_NOTE = re.compile(r'no\s+(issues?|problems?|errors?)(\s+(to\s+report|found|encountered))?', re.IGNORECASE)
 
+# Two items are the same item when most of the words of the shorter one are also in the other. In 26
+# live briefings no two items shared more than 23 per cent, so 60 per cent leaves a wide margin.
+REPEAT_OVERLAP = 0.6
+REPEAT_IGNORED_WORDS = {
+    "the", "a", "an", "of", "in", "on", "and", "to", "said", "says", "that", "for", "with", "at",
+    "is", "was", "by", "its", "has", "from",
+}
+# An item in the India section should say how it concerns India. Names of the Prime Minister and the
+# External Affairs Minister count too: India items about the Prime Minister often name only him.
+INDIA_TERMS = re.compile(
+    r"\b(India|Indian|Indians|Indo-\w+|New Delhi|Delhi|MEA|Ministry of External Affairs|Modi|Jaishankar)\b"
+)
+
 # Numbers for the grounding check: digits with optional thousands separators and decimals.
 GROUNDING_NUMBER = re.compile(r"\b\d{1,3}(?:,\d{3})+(?:\.\d+)?\b|\b\d+(?:\.\d+)?\b")
 NUMBER_WORDS = {
@@ -59,6 +72,8 @@ DATE_IN_TEXT = re.compile(rf"\b\d{{1,2}}(?:st|nd|rd|th)?\s+{MONTHS}\b|\b{MONTHS}
 # words that are only capitalised because they start a sentence.
 GROUNDING_IGNORED_WORDS = {
     "source", "bbc", "hindu", "google", "times", "toi", "tv", "new", "according", "key", "development",
+    # A title the article usually writes out in full, as "Prime Minister"
+    "pm",
     "the", "this", "that", "these", "those", "its", "it", "he", "she", "they", "we", "his", "her", "their",
     "per", "in", "on", "at", "as", "an", "and", "but", "also", "while", "after", "before", "however",
     "for", "from", "with", "by", "of", "to", "no", "not", "both", "all", "some", "other", "there", "one",
@@ -101,8 +116,6 @@ INJECTION_SIGNS = {
 # These can make the API refuse the whole request, which would lose the briefing,
 # so this content is withheld from the model instead of only being flagged.
 WITHHELD_INJECTION_SIGNS = {"encoded payload"}
-# Google News links are encoded article ids, so they always look like a payload.
-GOOGLE_NEWS_DOMAINS = ("news.google.com",)
 # 60 characters of base64 hold about 24 capitals and 24 lower case letters, and fewer than 12
 # of either is about a 1 in 1,000 chance. A URL path of capitalised words has one capital per
 # segment, so it would need 12 or more segments to reach this.
@@ -124,9 +137,9 @@ def find_injection_signs(text: str) -> list[str]:
 def looks_encoded(url: str) -> bool:
     """Checks whether a URL in fetched text hides an encoded payload.
 
-    Google News links are skipped, because their article ids look like encoded text. On every
-    other host, a long run only counts if it mixes capitals and lower case the way encoded text
-    does, so an ordinary long path such as /security-council/resolutions/2026 doesn't.
+    A long run only counts if it mixes capitals and lower case the way encoded text does, so an
+    ordinary long path such as /security-council/resolutions/2026 doesn't. Links with encoded ids,
+    such as Google News article links, do count, so an article that quotes one is withheld.
 
     Args:
         url: A URL found in fetched text.
@@ -134,8 +147,6 @@ def looks_encoded(url: str) -> bool:
     Returns:
         True if the URL should stay in the text for the encoded payload check.
     """
-    if is_allowed_domain(url, GOOGLE_NEWS_DOMAINS):
-        return False
     for run in INJECTION_SIGNS["encoded payload"].findall(url):
         if sum(c.isupper() for c in run) >= MIXED_CASE_MINIMUM and sum(c.islower() for c in run) >= MIXED_CASE_MINIMUM:
             return True
@@ -233,6 +244,25 @@ def check_freshness(cited: list[str], headline_meta: dict[str, str], max_hours: 
         except (TypeError, ValueError):
             unknown_date_urls.append(url)
     return stale_urls, unknown_date_urls
+
+def check_repeated_items(briefing: SubmitBriefing) -> list[str]:
+    """Finds items that repeat another item, in the same section or across the two.
+
+    Args:
+        briefing: The submitted briefing.
+
+    Returns:
+        One entry per repeated pair: the start of each claim.
+    """
+    items = [*briefing.key_developments, *briefing.india]
+    word_sets = [set(re.findall(r"[a-z0-9]+", item.claim.lower())) - REPEAT_IGNORED_WORDS for item in items]
+    repeated = []
+    for first in range(len(items)):
+        for second in range(first + 1, len(items)):
+            shorter = min(len(word_sets[first]), len(word_sets[second]))
+            if shorter and len(word_sets[first] & word_sets[second]) / shorter >= REPEAT_OVERLAP:
+                repeated.append(f"{items[first].claim[:60]} | {items[second].claim[:60]}")
+    return repeated
 
 def check_fetch_notes(notes: Sequence[str]) -> list[str]:
     """Flags fetch notes that don't describe the run, so news can't hide in them.
@@ -465,6 +495,11 @@ def run_evals(
     # The tools can't fetch an off-list page, so an off-list citation is also unverified. It is
     # checked on its own too, so the rule still holds for a briefing checked outside the agent.
     off_list = [url for url in cited if not is_allowed_domain(url, allowed_domains)]
+    # A warning: it catches a general story put in the India section, but a real India story can be
+    # worded without any of the terms.
+    india_off_topic = [item.claim for item in briefing.india if not INDIA_TERMS.search(item.claim)] if briefing else []
+    # Also a warning: a repeat wastes a slot, but each copy still cites what it says
+    repeated_items = check_repeated_items(briefing) if briefing else []
     notes_with_news = check_fetch_notes(briefing.fetch_notes) if briefing else []
 
     # A briefing with nothing verified has proved nothing. Stale and undated stories are warnings:
@@ -489,6 +524,8 @@ def run_evals(
         "notes_with_news": notes_with_news,
         "off_list": off_list,
         "ungrounded": ungrounded,
+        "india_off_topic": india_off_topic,
+        "repeated_items": repeated_items,
         "stale": stale,
         "unknown_date": unknown_date,
         "suspected_injections": list(suspected_injections),
@@ -510,6 +547,8 @@ def run_evals(
     print(f"Fetch notes that aren't about the run: {len(notes_with_news)}")
     print(f"Out of Bounds Domains: {len(off_list)}")
     print(f"Items naming things their article doesn't (warning): {len(ungrounded)}")
+    print(f"India items that don't mention India (warning): {len(india_off_topic)}")
+    print(f"Repeated items (warning): {len(repeated_items)}")
     print(f"Stale news warnings (>72h): {len(stale)}")
     print(f"Unknown publish date warnings: {len(unknown_date)}")
     print(f"Suspected prompt injections: {len(suspected_injections)}")
