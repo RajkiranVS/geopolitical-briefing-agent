@@ -40,8 +40,11 @@ NO_PROBLEMS_NOTE = re.compile(r'no\s+(issues?|problems?|errors?)(\s+(to\s+report
 # A fetch note should name something that went wrong. "Problems" and "issues" aren't on the list,
 # because notes such as "read without problems" use them to say nothing went wrong.
 FAILURE_WORDS = re.compile(
-    r"\b(fail\w*|error\w*|[45]\d\d|time[sd]?\s?out|timed out|withheld|ignored|none|truncated|cut off|"
-    r"could not|couldn't|cannot|can't|unavailable|refused|blocked|redirect\w*)\b",
+    # A status code counts only after a word such as "returned" or "HTTP", so "450 words" isn't one.
+    # FETCH_\w+ is listed because the underscore in FETCH_FAILED stops "fail" from matching there.
+    r"\b(fail\w*|fetch_\w+|error\w*|(?:http|status|code|returned|gave|got|an?)\W{1,3}[45]\d\d|forbidden|"
+    r"not found|time[sd]?\s?out|withheld|ignored|none|empty|truncated|cut off|could not|couldn't|cannot|"
+    r"can't|unable|unavailable|unreadable|refused|blocked|redirect\w*)\b",
     re.IGNORECASE,
 )
 

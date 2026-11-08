@@ -68,9 +68,10 @@ PAGE_LINE = re.compile(
     r"^(?:- Published|\(With inputs from [^)\n]*\)|Additional reporting by [^\n]*|Images? Courtesy:[^\n]*)[ \t]*$",
     re.MULTILINE | re.IGNORECASE,
 )
-# India TV's "Also read:" line and the headline of another story on the very next line. Only the next
-# line: if a blank line follows, what comes after it may be the story, so the label goes on its own.
-ALSO_READ_BLOCK = re.compile(r"^Also read:?[ \t]*\n[^\n]+$", re.MULTILINE | re.IGNORECASE)
+# India TV's "Also read:" line and the headline of another story on the very next line. The next line
+# goes only if it looks like a headline: under 150 characters, not ending in a full stop, a question mark
+# or an exclamation mark. A blank line or a sentence after the label may be the story, so it stays.
+ALSO_READ_BLOCK = re.compile(r"^Also read:?[ \t]*\n[^\n]{0,148}[^\n.!?]$", re.MULTILINE | re.IGNORECASE)
 # The same link written on one line, "Also read: <headline>", or the label left without a headline.
 ALSO_READ_LINE = re.compile(r"^Also read(?::[^\n]*|[ \t]*)$", re.MULTILINE | re.IGNORECASE)
 
@@ -645,7 +646,6 @@ def build_agent(run: RunState, models: tuple | None = None):
             messages = cast(list[BaseMessage], add_messages(list(messages), [model_response, *answer_calls(model_response, EARLY_SUBMISSION)]))
             model_response = call_llm(messages).result()
 
-
         # A briefing that doesn't fit the schema would lose all the reading done so far, so the
         # model gets the errors and one more try. Only one, so a model that keeps failing can't loop.
         call = briefing_call(model_response)
@@ -654,6 +654,12 @@ def build_agent(run: RunState, models: tuple | None = None):
             reply = f"{BRIEFING_TOOL} didn't fit the schema: {error} Call {BRIEFING_TOOL} again with valid fields."
             messages = cast(list[BaseMessage], add_messages(list(messages), [model_response, *answer_calls(model_response, reply)]))
             model_response = call_llm(messages, must_submit=True).result()
+        # A forced call can't carry other calls while the API honours disable_parallel_tool_use. If it
+        # ever does, those calls haven't run, and the evals will fail any citation they were meant to cover.
+        submitted = briefing_call(model_response)
+        unanswered = [tool_call["name"] for tool_call in model_response.tool_calls if tool_call is not submitted]
+        if unanswered:
+            logger.warning("The final response also called %s; those calls were not run", ", ".join(unanswered))
         return cast(list[BaseMessage], add_messages(list(messages), model_response))
 
     return agent

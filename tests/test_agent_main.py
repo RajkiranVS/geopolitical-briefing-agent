@@ -1772,3 +1772,34 @@ def test_sentence_that_starts_with_also_is_kept(agent_module):
     """
     text = "The talks resumed.\nAlso read out at the meeting was a statement from the prime minister."
     assert agent_module.trim_article(text) == text
+
+
+def test_sentence_after_an_also_read_label_is_kept(agent_module):
+    """Checks that the line after a lone "Also read:" label stays when it reads as a sentence, not a headline.
+
+    Args:
+        agent_module: The agent module.
+    """
+    # Regression: found in review. The line after the label was removed whatever it was.
+    text = "The talks resumed.\nAlso read:\nThe ministers said a deal on transit could be signed next month."
+    trimmed = agent_module.trim_article(text)
+    assert "Also read" not in trimmed
+    assert "The ministers said a deal on transit could be signed next month." in trimmed
+
+
+def test_forced_response_with_other_calls_is_logged(agent_module, caplog):
+    """Checks that calls arriving with the forced briefing, which never run, are logged rather than dropped silently.
+
+    Args:
+        agent_module: The agent module.
+        caplog: Pytest fixture that captures log records.
+    """
+    # Regression: found in review. disable_parallel_tool_use prevents this, but if the setting is ever
+    # dropped, a fetch sent with the forced briefing would not run and nothing would say so.
+    forced = briefing_message([("Leaders met.", ARTICLE_URL)])
+    forced.tool_calls.insert(0, FEED_CALL)
+    final_model = ScriptedModel([forced])
+    tool_model = ScriptedModel([AIMessage(content="Here is the briefing in text.")])
+    messages = scripted_agent(agent_module, tool_model, final_model).invoke([HumanMessage(content="Brief me")])
+    assert agent_module.find_briefing(messages).key_developments[0].claim == "Leaders met."
+    assert "The final response also called get_headlines; those calls were not run" in caplog.text
