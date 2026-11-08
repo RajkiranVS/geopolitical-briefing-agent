@@ -1141,18 +1141,57 @@ def test_malformed_briefing_is_retried_only_once(agent_module):
     assert agent_module.find_briefing(messages) is None
 
 
-def test_calls_made_alongside_a_malformed_briefing_are_answered(agent_module):
-    """Checks that every other call in the same response gets a result, as the API requires.
+def test_calls_made_alongside_a_malformed_briefing_run_before_the_retry(agent_module):
+    """Checks that calls made with a malformed briefing still run, and the briefing is sent back.
 
     Args:
         agent_module: The agent module.
     """
+    tool_model = ScriptedModel([malformed_briefing(other_calls=[FEED_CALL]), malformed_briefing()])
     final_model = ScriptedModel([briefing_message([("Leaders met.", ARTICLE_URL)])])
-    agent = scripted_agent(agent_module, ScriptedModel([malformed_briefing(other_calls=[FEED_CALL])]), final_model)
-    agent.invoke([HumanMessage(content="Brief me")])
-    results = {message.tool_call_id: message.content for message in final_model.calls[0][-2:]}
+    scripted_agent(agent_module, tool_model, final_model).invoke([HumanMessage(content="Brief me")])
+    results = {message.tool_call_id: message.content for message in tool_model.calls[1][-2:]}
     assert set(results) == {"call_1", "call_bad"}
-    assert results["call_1"].startswith("Not run")
+    # The feed call ran (and was refused, as an unknown feed), and the briefing was sent back
+    assert results["call_1"].startswith("FETCH_FAILED: https://example.com/feed is not an allowed feed")
+    assert results["call_bad"].startswith("Not accepted yet")
+    assert "didn't fit the schema" in final_model.calls[0][-1].content
+
+
+def test_fetch_called_with_the_briefing_runs_before_the_briefing_counts(agent_module, monkeypatch):
+    """Checks that an article fetched in the same turn as the briefing is read before the run ends.
+
+    Args:
+        agent_module: The agent module.
+        monkeypatch: Pytest fixture that replaces attributes for the length of the test.
+    """
+    # Regression: found in review. The loop stopped at the briefing, so the fetch never ran and the
+    # briefing's citation of that article failed as cited but not read.
+    monkeypatch.setattr(agent_module, "extract", lambda html: "Leaders met in Delhi.")
+    monkeypatch.setattr(agent_module, "fetch_response", lambda url, **kwargs: SimpleNamespace(url=url, status=200, html=ARTICLE_HTML))
+    run = agent_module.RunState()
+    run.headline_links.add(ARTICLE_URL)
+    fetch = {"name": "fetch_article", "args": {"url": ARTICLE_URL}, "id": "call_fetch", "type": "tool_call"}
+    together = briefing_message([("Leaders met in Delhi.", ARTICLE_URL)])
+    together.tool_calls.insert(0, fetch)
+    tool_model = ScriptedModel([together, briefing_message([("Leaders met in Delhi.", ARTICLE_URL)])])
+    agent = agent_module.build_agent(run, models=(tool_model, ScriptedModel([briefing_message()])))
+    messages = agent.invoke([HumanMessage(content="Brief me")])
+    assert ARTICLE_URL in run.fetched
+    assert len(tool_model.calls) == 2
+    assert "Not accepted yet" in tool_model.calls[1][-1].content
+    briefing = agent_module.find_briefing(messages)
+    report = agent_module.run_evals(briefing, run.fetched, run.headline_meta)
+    assert report["unverified"] == [] and report["passed"] is True
+
+
+def test_prompt_asks_for_the_briefing_in_a_turn_of_its_own(agent_module):
+    """Checks that the prompt tells the model to submit only after its fetches have returned.
+
+    Args:
+        agent_module: The agent module.
+    """
+    assert "in a turn of its own after\nevery fetch has returned" in agent_module.SYSTEMPROMPT
 
 
 def test_main_reports_an_agent_crash_and_exits_1(agent_module, monkeypatch, tmp_path, capsys):
@@ -1664,3 +1703,34 @@ def test_every_allowed_feed_is_on_an_allowed_site(agent_module):
     """
     assert all(is_allowed_domain(url, DEFAULT_ALLOWED_DOMAINS) for url in agent_module.ALLOWED_FEEDS)
     assert all(url in agent_module.SYSTEMPROMPT for url in agent_module.ALLOWED_FEEDS)
+
+
+def test_page_text_that_is_not_the_story_is_trimmed(agent_module):
+    """Checks that bylines, credits and links to other stories are removed before the model reads an article.
+
+    Args:
+        agent_module: The agent module.
+    """
+    # Regression: found in review. India TV's "Also read" headline and photo credits used up characters
+    # and added names, such as another story's, that the grounding check then accepted.
+    text = (
+        "Houthis say 33 killed in Saudi air strike\n- Published\nMedia linked to the Houthis said 33 people died.\n"
+        "Washington:\nThe US disabled a cargo vessel.\n(With inputs from ANI, AP)\nAlso read:\n"
+        "US sanctions India-based couple over maritime fraud\nImages Courtesy: istock\n"
+        "Additional reporting by Olivia Ireland\nThe talks continue on Monday."
+    )
+    trimmed = agent_module.trim_article(text)
+    for removed in ("- Published", "With inputs from", "Also read", "sanctions India-based couple", "Images Courtesy", "Olivia Ireland"):
+        assert removed not in trimmed, removed
+    for kept in ("Houthis say 33 killed", "Washington:", "The US disabled a cargo vessel.", "The talks continue on Monday."):
+        assert kept in trimmed, kept
+
+
+def test_hindu_footer_is_still_removed_and_the_cap_still_applies(agent_module):
+    """Checks The Hindu's footer and the character cap after the wider trimming.
+
+    Args:
+        agent_module: The agent module.
+    """
+    assert agent_module.trim_article("Talks resumed.\nPublished - November 08, 2026 10:00 am IST\nTopics") == "Talks resumed."
+    assert len(agent_module.trim_article("word " * 2000)) == agent_module.MAX_ARTICLE_CHARS
