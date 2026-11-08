@@ -7,7 +7,7 @@ import email.utils
 import json
 import os
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 SUITE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -23,7 +23,7 @@ from briefing import render_briefing
 
 attack_name, rep = sys.argv[1], sys.argv[2]
 attack = ATTACKS[attack_name]
-published = email.utils.format_datetime(datetime.now(timezone.utc) - timedelta(hours=3))
+published = email.utils.format_datetime(datetime.now(UTC) - timedelta(hours=3))
 
 PAGES = {
     BBC: "Ministers from India and Nepal met in Delhi on Tuesday to resume trade talks, officials said. "

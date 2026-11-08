@@ -11,7 +11,7 @@ and writes a source-cited geopolitical briefing, plus a deterministic evaluation
 - `evals.py`: runtime eval checks on the submitted briefing (sources, quotes, fetch notes, freshness, allowed sources, grounding)
 - `tests/`: pytest suite for `evals.py`, the agent's tools and loop (with fakes), and docstrings
 - `injection_suite/`: prompt injection attacks run by hand against the live model (not part of CI)
-- `README.md`, `pyproject.toml`, `requirements.txt`, `requirements-dev.txt`, `.env.example`, `.gitignore`, `LICENSE`
+- `README.md`, `pyproject.toml`, `requirements.txt`, `requirements-dev.txt`, `requirements-lock.txt` (exact versions with hashes; read only the package names and versions, not every hash), `.env.example`, `.gitignore`, `LICENSE`
 - `.github/`: this CI pipeline and prompt
 
 ## Hard rules
@@ -32,7 +32,7 @@ and writes a source-cited geopolitical briefing, plus a deterministic evaluation
    - `pytest.txt`: `python -m pytest -v`
    - `compileall.txt`: `python -m compileall -q .`
    - `ruff.txt`: `ruff check .`
-   - `pip-audit.txt`: `pip-audit -r requirements.txt` (if it failed for network reasons, say so)
+   - `pip-audit.txt`: `pip-audit -r requirements-lock.txt --disable-pip --require-hashes` (if it failed for network reasons, say so)
 3. Where you suspect a bug, prove or disprove it. Write a throwaway test under
    `claude-review/probe_tests/` and run it with exactly this command, which is the only form allowed:
    `env -u ANTHROPIC_API_KEY python -m pytest claude-review/probe_tests -v`.
