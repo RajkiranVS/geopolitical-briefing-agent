@@ -676,7 +676,7 @@ def check_items_grounded(briefing: str, fetched: dict[str, str]) -> list[str]:
             flagged.append(f"{item[:80]}: not in the cited article: {', '.join(sorted(missing))}")
     return flagged
 
-DEFAULT_ALLOWED_DOMAINS = ("bbc.co.uk", "bbci.co.uk", "bbc.com", "thehindu.com", "news.google.com")
+DEFAULT_ALLOWED_DOMAINS = ("bbc.co.uk", "bbci.co.uk", "bbc.com", "thehindu.com")
 
 def run_evals(briefing: str, fetched: dict[str, str], headline_meta: dict[str, str], report_path: str | None = "eval_report.json", allowed_domains: Sequence[str] = DEFAULT_ALLOWED_DOMAINS, now: datetime | None = None, suspected_injections: Sequence[str] = ()) -> dict:
     """Runs all the checks, prints a summary and writes the report if report_path is given.
