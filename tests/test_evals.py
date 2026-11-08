@@ -810,6 +810,28 @@ def test_grounding_ignores_list_numbers_and_the_word_one():
     item = f"1. One of the tankers caught fire in the Gulf. Source: {GROUNDING_URL}"
     assert check_grounding(item, GROUNDING_ARTICLE) == []
 
+def test_grounding_catches_a_swapped_abbreviation():
+    """Checks that short abbreviations are compared exactly, so US and UK can't be swapped."""
+    # Regression: found in review. Names under three letters were skipped, so "UK" for "US" passed.
+    assert check_grounding("- The UK Navy fired on the vessel.", "The US Navy fired on the vessel.") == ["UK"]
+
+def test_grounding_matches_abbreviations_written_with_stops_or_spelled_out():
+    """Checks that "U.S." matches "US", and "UN" matches an article that says "United Nations"."""
+    article = "The U.S. Navy fired. The United Nations and the Ministry of External Affairs responded."
+    assert check_grounding("- The US Navy fired, and the UN and the MEA responded.", article) == []
+
+def test_initials_from_part_of_a_name_do_not_match():
+    """Checks that an abbreviation must spell out a whole name, not part of a longer one."""
+    # Regression: found in review. Every part of a run of capitalised words counted, so "UK" matched "Ugandan Kenyan Partnership".
+    article = "The Ugandan Kenyan Partnership met on Monday."
+    assert check_grounding("- UK officials met on Monday.", article) == ["UK"]
+
+def test_grounding_matches_numbers_written_differently():
+    """Checks that compound number words and an article's "one" match digits in the item."""
+    # Regression: found in review. "Twenty-five" was read as 20 and 5, and "1" didn't match "one".
+    article = "Twenty-five sailors were rescued and one tanker sank."
+    assert check_grounding("- 25 sailors were rescued and 1 tanker sank.", article) == []
+
 def test_bold_marker_with_colon_inside_and_bullets_accepted():
     """Checks that notes after a marker with the wrapper closing after the colon are recognised."""
     # Regression: found in review. The closing "**" was left on the marker line and failed the notes check.

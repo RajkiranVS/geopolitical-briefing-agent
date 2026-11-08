@@ -474,6 +474,23 @@ def test_failed_fetches_stop_after_the_limit(tools, monkeypatch):
     assert all(result.startswith("FETCH_LIMIT_REACHED") for result in results[tools.MAX_FAILED_FETCHES:])
 
 
+def test_parallel_calls_for_one_link_download_it_once(tools, monkeypatch):
+    """Checks that two calls for the same link in one turn download it only once.
+
+    Args:
+        tools: The agent module with its tool state reset and one article link allowed.
+        monkeypatch: Pytest fixture that replaces attributes for the length of the test.
+    """
+    # Regression: found in review. Both calls downloaded the link and used up its retry allowance.
+    urls, requests = allow_articles(monkeypatch, tools, 1, delay=0.2)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda url: tools.fetch_article.invoke({"url": url}), urls * 2))
+    assert len(requests) == 1
+    assert sum("Article text." in result for result in results) == 1
+    assert sum("already being fetched" in result for result in results) == 1
+    assert tools.fetch_attempts == {urls[0]: 1}
+
+
 def test_parallel_failing_fetches_cannot_pass_the_failure_limit(tools, monkeypatch):
     """Checks that failing downloads running at once can't go past the failure limit.
 
