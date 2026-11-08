@@ -5,6 +5,8 @@ import email.utils
 import json
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from briefing import (
     EMPTY_SECTION_PLACEHOLDER,
     BriefingItem,
@@ -626,6 +628,11 @@ def test_notes_that_name_a_failure_pass():
         "The BBC article returned FETCH_FAILED.",
         "The Times of India feed was unable to load.",
         "The Hindu article page was empty.",
+        # Found in review: ordinary wordings, the first being get_headlines' own failure message
+        "The India TV feed had no usable items.",
+        "BBC feed returned no headlines.",
+        "The Times of India article was paywalled.",
+        "The Hindu article page was blank.",
         "none",
     ]
     report = evaluate(make_briefing([("Leaders met.", URL)], fetch_notes=notes))
@@ -635,6 +642,30 @@ def test_notes_saying_everything_worked_are_reported():
     """Checks that notes that only say things went well are reported, since the notes are for failures."""
     note = "The Hindu feed and BBC feed headlines were read without problems; five articles were fetched and used."
     assert evaluate(make_briefing([("Leaders met.", URL)], fetch_notes=[note]))["notes_without_failure"] == [note]
+
+def test_no_articles_fetched_from_a_feed_is_not_a_failure():
+    """Checks that a note saying a feed was only used for headlines isn't taken for a failure."""
+    # From a live run: "no articles" here describes a choice, not something that went wrong.
+    note = "The Hindu international feed and BBC world feed were read successfully; India TV was read for headlines only and no articles from it were fetched."
+    assert evaluate(make_briefing([("Leaders met.", URL)], fetch_notes=[note]))["notes_without_failure"] == [note]
+
+@pytest.mark.parametrize("note", [
+    "The BBC feed gave a 500-word summary of the Krakow story.",
+    "The Hindu feed found no articles older than a day.",
+])
+def test_success_notes_that_look_like_failures_are_reported(note):
+    """Checks that a word count or a good search result isn't taken for a failure.
+
+    Args:
+        note: A note that says something went well.
+    """
+    # Regression: found in review. "a 500" read as a status code, and "found no articles" as a failure.
+    assert evaluate(make_briefing([("Leaders met.", URL)], fetch_notes=[note]))["notes_without_failure"] == [note]
+
+def test_status_code_in_a_failure_note_still_counts():
+    """Checks that a status code after "a" still names a failure."""
+    note = "The Times of India article got a 500 error."
+    assert evaluate(make_briefing([("Leaders met.", URL)], fetch_notes=[note]))["notes_without_failure"] == []
 
 def test_a_number_alone_is_not_a_failure_status():
     """Checks that a number such as a word count isn't taken for an HTTP status."""

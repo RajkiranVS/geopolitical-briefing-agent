@@ -40,11 +40,16 @@ NO_PROBLEMS_NOTE = re.compile(r'no\s+(issues?|problems?|errors?)(\s+(to\s+report
 # A fetch note should name something that went wrong. "Problems" and "issues" aren't on the list,
 # because notes such as "read without problems" use them to say nothing went wrong.
 FAILURE_WORDS = re.compile(
-    # A status code counts only after a word such as "returned" or "HTTP", so "450 words" isn't one.
+    # A status code counts only after a word such as "returned" or "HTTP", and not before "word" or a
+    # hyphen, so "450 words" and "a 500-word summary" aren't one.
     # FETCH_\w+ is listed because the underscore in FETCH_FAILED stops "fail" from matching there.
-    r"\b(fail\w*|fetch_\w+|error\w*|(?:http|status|code|returned|gave|got|an?)\W{1,3}[45]\d\d|forbidden|"
-    r"not found|time[sd]?\s?out|withheld|ignored|none|empty|truncated|cut off|could not|couldn't|cannot|"
-    r"can't|unable|unavailable|unreadable|refused|blocked|redirect\w*)\b",
+    r"\b(fail\w*|fetch_\w+|error\w*|(?:http|status|code|returned|gave|got|an?)\W{1,3}[45]\d\d(?![-\d]|\s+(?:words?|characters?)\b)|forbidden|"
+    r"not found|time[sd]?\s?out|withheld|ignored|none|empty|blank|truncated|cut off|could not|couldn't|"
+    r"cannot|can't|unable|unavailable|unreadable|refused|blocked|redirect\w*|paywall\w*|no usable|"
+    # "No articles" counts only after a verb such as "returned": notes that say all went well use
+    # it too, as in "no articles from them were fetched". "Found" isn't one of the verbs, because
+    # "found no articles older than a day" reports a good result.
+    r"(?:had|has|returned|gave|got|with|contained|yielded)\s+no\s+(?:items|headlines|articles|text|content))\b",
     re.IGNORECASE,
 )
 

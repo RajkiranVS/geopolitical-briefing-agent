@@ -68,10 +68,15 @@ PAGE_LINE = re.compile(
     r"^(?:- Published|\(With inputs from [^)\n]*\)|Additional reporting by [^\n]*|Images? Courtesy:[^\n]*)[ \t]*$",
     re.MULTILINE | re.IGNORECASE,
 )
-# India TV's "Also read:" line and the headline of another story on the very next line. The next line
-# goes only if it looks like a headline: under 150 characters, not ending in a full stop, a question mark
-# or an exclamation mark. A blank line or a sentence after the label may be the story, so it stays.
-ALSO_READ_BLOCK = re.compile(r"^Also read:?[ \t]*\n[^\n]{0,148}[^\n.!?]$", re.MULTILINE | re.IGNORECASE)
+# India TV's "Also read:" line and the line after it, which is usually another story's headline.
+# looks_like_headline decides whether that line goes too.
+ALSO_READ_BLOCK = re.compile(r"^Also read:?[ \t]*\n([^\n]*)$", re.MULTILINE | re.IGNORECASE)
+# A line that ends like a sentence: a full stop or exclamation mark, or punctuation inside a closing
+# quote, as in `respond.”` or `ready?"`. A question mark alone doesn't count: headlines can be questions.
+SENTENCE_END = re.compile(r"[.!]$|[.!?,][\"'”’]+$")
+# Quoted speech: a quote mark at the start of the line or after a comma or colon, as in `He said, "We`.
+# A headline quotes a phrase inside the line instead, as in `Iran rejects 'peace plan'`.
+QUOTED_SPEECH = re.compile(r"(?:^|[,:]\s*)[\"'“‘]")
 # The same link written on one line, "Also read: <headline>", or the label left without a headline.
 ALSO_READ_LINE = re.compile(r"^Also read(?::[^\n]*|[ \t]*)$", re.MULTILINE | re.IGNORECASE)
 
@@ -164,6 +169,24 @@ def clean_feed_text(text: str, limit: int = 500) -> str:
     no_tags = re.sub(r"<[^>]+>", " ", html.unescape(text))
     return " ".join(no_tags.split())[:limit]
 
+def looks_like_headline(line: str) -> bool:
+    """Decides whether the line after an "Also read:" label is another story's headline.
+
+    A blank line, a long line, a line that ends like a sentence, and quoted speech that ends in a quote
+    are kept, since they may be the story itself. Keeping a stray headline is cheaper than losing a line
+    of the story.
+
+    Args:
+        line: The line after the label.
+
+    Returns:
+        True if the line should be removed with the label.
+    """
+    line = line.strip()
+    if not line or len(line) >= 150 or SENTENCE_END.search(line):
+        return False
+    return not (line[-1] in "\"'”’" and QUOTED_SPEECH.search(line))
+
 def trim_article(text: str) -> str:
     """Cuts an article down to what the model reads.
 
@@ -177,7 +200,7 @@ def trim_article(text: str) -> str:
     Returns:
         The trimmed article text.
     """
-    text = ALSO_READ_BLOCK.sub("", text)
+    text = ALSO_READ_BLOCK.sub(lambda match: "" if looks_like_headline(match[1]) else match[1], text)
     text = ALSO_READ_LINE.sub("", text)
     text = PAGE_LINE.sub("", text)
     marker = text.find("Published -")
@@ -469,11 +492,12 @@ def bind_models(model, tools: list) -> tuple:
         A tuple (tool_model, final_model). tool_model may call any tool, several at once, so fetches
         run in parallel. final_model must call SubmitBriefing and nothing else: with parallel calls off,
         the API can't attach a fetch to a forced submission, where it would never run. The other tools
-        stay defined because the message history contains calls to them.
+        stay defined because the message history contains calls to them. If thinking were turned on,
+        langchain-anthropic would drop the forced choice, but parallel calls would still be off.
     """
     all_tools = [*tools, SubmitBriefing]
-    forced = {"type": "tool", "name": BRIEFING_TOOL, "disable_parallel_tool_use": True}
-    return model.bind_tools(all_tools), model.bind_tools(all_tools, tool_choice=forced)
+    final_model = model.bind_tools(all_tools, tool_choice=BRIEFING_TOOL, parallel_tool_calls=False)
+    return model.bind_tools(all_tools), final_model
 
 def tool_error(tool_call: ToolCall, content: str) -> ToolMessage:
     """Builds the result for a tool call that didn't run.
