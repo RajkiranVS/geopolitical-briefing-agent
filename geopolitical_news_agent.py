@@ -1,5 +1,6 @@
 """LangGraph agent that writes a cited geopolitical news briefing from a fixed list of feeds."""
 import argparse
+import email.utils
 import functools
 import html
 import logging
@@ -9,6 +10,7 @@ import secrets
 import sys
 import textwrap
 import threading
+import zlib
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -51,13 +53,20 @@ MODEL_ENV_VAR = "BRIEFING_MODEL"
 DEFAULT_REQUEST = "Give me today's geopolitical briefing."
 REPORT_DIR = Path("eval_reports")
 
-# get_headlines only accepts these exact URLs. See the README for why there is no India-specific feed.
+# get_headlines only accepts these exact URLs. Their article links must be on DEFAULT_ALLOWED_DOMAINS.
 ALLOWED_FEEDS = (
     "https://feeds.bbci.co.uk/news/world/rss.xml",
     "https://www.thehindu.com/news/international/feeder/default.rss",
+    "https://www.thehindu.com/news/national/feeder/default.rss",
+    "https://www.indiatvnews.com/rssnews/topstory-world.xml",
+    "https://timesofindia.indiatimes.com/rssfeeds/296589292.cms",
 )
 
 MAX_HEADLINES = 15
+# Some feeds send a gzip file inside gzip encoding, so the body is still compressed after download.
+# It is decompressed up to this size, so a small malicious feed can't expand into gigabytes.
+MAX_FEED_BYTES = 5_000_000
+GZIP_MAGIC = b"\x1f\x8b"
 MAX_ARTICLE_CHARS = 4000
 MAX_ARTICLES = 5
 # The prompt allows one retry per link. The failure limit is far above what a normal run needs, so
@@ -165,6 +174,46 @@ def fence_untrusted(content: str) -> str:
     fence_id = secrets.token_hex(8)
     return f'<untrusted_content id="{fence_id}">\n{content}\n</untrusted_content id="{fence_id}">'
 
+def decompress_feed(data: bytes) -> bytes | None:
+    """Decompresses a feed body that is still gzip after download, as India TV's is.
+
+    Args:
+        data: The downloaded body.
+
+    Returns:
+        The body, decompressed if it was gzip, or None if it was corrupt or larger than MAX_FEED_BYTES.
+    """
+    if not data.startswith(GZIP_MAGIC):
+        return data
+    decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    try:
+        body = decompressor.decompress(data, MAX_FEED_BYTES)
+    except zlib.error:
+        return None
+    # Only a stream that reached its end is complete. Otherwise the body was over the limit, or was
+    # cut off, and a partial feed could be read as if it were whole.
+    if not decompressor.eof:
+        return None
+    return body
+
+def feed_date(entry) -> str | None:
+    """Gives a feed item's publish date in the RFC 2822 form the freshness check reads.
+
+    Feeds write dates in different forms. The Times of India uses ISO 8601, such as
+    2026-11-08T12:55:15+05:30, which feedparser reads into published_parsed, in UTC.
+
+    Args:
+        entry: A feedparser entry.
+
+    Returns:
+        The date, such as "Sun, 08 Nov 2026 07:25:15 +0000", the feed's own text if it couldn't be
+        read, or None if the item has no date.
+    """
+    parsed = entry.get("published_parsed") or entry.get("updated_parsed")
+    if parsed:
+        return email.utils.format_datetime(datetime(*parsed[:6], tzinfo=timezone.utc))
+    return entry.get("published") or entry.get("updated")
+
 def download_feed(feed_url: str):
     """Downloads and parses a feed, trying once more if the result can't be parsed cleanly.
 
@@ -184,7 +233,10 @@ def download_feed(feed_url: str):
         # Redirects are followed, so check where the feed really came from
         if not is_allowed_domain(response.url, DEFAULT_ALLOWED_DOMAINS):
             return None, f"FETCH_FAILED: {feed_url} redirected to a host that is not allowed."
-        feed = feedparser.parse(response.data)
+        data = decompress_feed(response.data)
+        if data is None:
+            return None, f"FETCH_FAILED: {feed_url} sent a compressed body that couldn't be read."
+        feed = feedparser.parse(data)
         if feed.entries and not feed.get("bozo"):
             return feed, ""
         # Keep a parse that has items, in case the second download fails altogether
@@ -311,7 +363,7 @@ def make_tools(run: RunState) -> list:
                 f"Link: {link or 'No link'}\n"
                 f"Summary: {summary}"
             )
-            published = entry.get('published')
+            published = feed_date(entry)
             if link:
                 run.headline_links.add(normalize_url(link))
                 run.feed_links[normalize_url(link)] = link

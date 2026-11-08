@@ -157,8 +157,13 @@ def test_normal_urls_are_still_allowed():
         "https://www.bbc.com/news/articles/abc?at_medium=RSS",
         "https://www.thehindu.com/news/international/article123.ece",
         "https://feeds.bbci.co.uk/news/world/rss.xml",
+        "https://www.indiatvnews.com/news/world/israel-gadi-eisenkot-form-government-2026-11-08-1058930",
+        "https://timesofindia.indiatimes.com/world/us/some-story/articleshow/135653662.cms",
     ):
         assert is_allowed_domain(url, DEFAULT_ALLOWED_DOMAINS), url
+    # Only the Times of India, not every indiatimes.com site; and Firstpost, which refuses automated readers, isn't allowed
+    for url in ("https://economictimes.indiatimes.com/x", "https://www.firstpost.com/world/x.html"):
+        assert not is_allowed_domain(url, DEFAULT_ALLOWED_DOMAINS), url
 
 def test_other_google_hosts_are_refused():
     """Checks that Google hosts other than Google News are refused."""

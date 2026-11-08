@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 from briefing import SubmitBriefing
 
 # Only these hosts may be fetched or cited.
-DEFAULT_ALLOWED_DOMAINS = ("bbc.co.uk", "bbci.co.uk", "bbc.com", "thehindu.com")
+DEFAULT_ALLOWED_DOMAINS = ("bbc.co.uk", "bbci.co.uk", "bbc.com", "thehindu.com", "indiatvnews.com", "timesofindia.indiatimes.com")
 
 # '*', backticks, square brackets, pipes and double or curly quotes are never part of a URL
 # (Markdown, table and prose wrappers). '_' and '!' can appear inside URLs, so they are only
@@ -58,7 +58,7 @@ DATE_IN_TEXT = re.compile(rf"\b\d{{1,2}}(?:st|nd|rd|th)?\s+{MONTHS}\b|\b{MONTHS}
 # Capitalised words that aren't facts about the story: the outlets the briefing cites, and common
 # words that are only capitalised because they start a sentence.
 GROUNDING_IGNORED_WORDS = {
-    "source", "bbc", "hindu", "google", "new", "according", "key", "development",
+    "source", "bbc", "hindu", "google", "times", "toi", "tv", "new", "according", "key", "development",
     "the", "this", "that", "these", "those", "its", "it", "he", "she", "they", "we", "his", "her", "their",
     "per", "in", "on", "at", "as", "an", "and", "but", "also", "while", "after", "before", "however",
     "for", "from", "with", "by", "of", "to", "no", "not", "both", "all", "some", "other", "there", "one",
