@@ -121,10 +121,13 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
         run: |
           mkdir -p claude-review/checks
+          # The step shell stops at the first failing command, so each check's status is caught here.
+          # A failing check is a result for Claude to report, not a reason to stop the review.
           run_check() {
             name=$1; shift
-            "$@" > "claude-review/checks/$name.txt" 2>&1
-            echo "exit code: $?" >> "claude-review/checks/$name.txt"
+            status=0
+            "$@" > "claude-review/checks/$name.txt" 2>&1 || status=$?
+            echo "exit code: $status" >> "claude-review/checks/$name.txt"
           }
           run_check pytest python -m pytest -v
           run_check compileall python -m compileall -q .

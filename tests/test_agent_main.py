@@ -303,8 +303,8 @@ class ToolHarness:
     """One run's tools and state, with the agent module behind them.
 
     Reading an attribute looks in the run's state, then the run's tools, then the module, so a test
-    can write tools.fetched or tools.fetch_article. Setting an attribute sets it on the module, so
-    monkeypatch can replace the module's fetch_response or extract through the harness.
+    can write tools.fetched or tools.fetch_article. To replace a module function such as
+    fetch_response, patch tools.module: monkeypatch undoes a patch on the object it was given.
     """
 
     def __init__(self, module, run):
@@ -333,14 +333,17 @@ class ToolHarness:
             return self.run_tools[name]
         return getattr(self.module, name)
 
-    def __setattr__(self, name, value):
-        """Sets an attribute on the module, such as a fake fetch_response.
 
-        Args:
-            name: The attribute's name.
-            value: The new value.
-        """
-        setattr(self.module, name, value)
+def agent_of(target):
+    """Finds the agent module, whether given the module itself or a ToolHarness.
+
+    Args:
+        target: The agent module or a ToolHarness.
+
+    Returns:
+        The agent module.
+    """
+    return getattr(target, "module", target)
 
 
 @pytest.fixture
@@ -399,7 +402,7 @@ def set_fetch_response(monkeypatch, module, response) -> list[dict]:
         requests.append({"url": url, **kwargs})
         return response
 
-    monkeypatch.setattr(module, "fetch_response", fake_fetch_response)
+    monkeypatch.setattr(agent_of(module), "fetch_response", fake_fetch_response)
     return requests
 
 
@@ -444,8 +447,8 @@ def set_feed(monkeypatch, module, final_url: str, title: str = "T", summary: str
             entries=[FeedParserDict(title=title, published="Mon, 02 Nov 2026 10:00:00 GMT", link=ARTICLE_URL, summary=summary)],
         )
 
-    monkeypatch.setattr(module, "fetch_response", fake_fetch_response)
-    monkeypatch.setattr(module.feedparser, "parse", fake_parse)
+    monkeypatch.setattr(agent_of(module), "fetch_response", fake_fetch_response)
+    monkeypatch.setattr(agent_of(module).feedparser, "parse", fake_parse)
     return requests
 
 
@@ -557,7 +560,7 @@ def allow_articles(monkeypatch, module, count: int, delay: float = 0.0, failing:
         time.sleep(delay)
         return SimpleNamespace(url=url, status=404 if url in failing else 200, html=ARTICLE_HTML)
 
-    monkeypatch.setattr(module, "fetch_response", fake_fetch_response)
+    monkeypatch.setattr(agent_of(module), "fetch_response", fake_fetch_response)
     return urls, requests
 
 
@@ -704,7 +707,7 @@ def test_crashing_download_counts_as_a_failed_fetch(tools, monkeypatch):
         """
         raise ConnectionError("down")
 
-    monkeypatch.setattr(tools, "fetch_response", crash)
+    monkeypatch.setattr(tools.module, "fetch_response", crash)
     with pytest.raises(ConnectionError):
         tools.fetch_article.invoke({"url": ARTICLE_URL})
     assert tools.failed_fetches == [ARTICLE_URL]
@@ -829,7 +832,7 @@ def test_feed_download_uses_the_protected_client(tools, monkeypatch):
         """
         received.update(kwargs)
 
-    monkeypatch.setattr(tools, "fetch_response", fake_fetch_response)
+    monkeypatch.setattr(tools.module, "fetch_response", fake_fetch_response)
     assert tools.get_headlines.invoke({"feed_url": tools.ALLOWED_FEEDS[0]}).startswith("FETCH_FAILED")
     assert received["config"] is tools.FETCH_CONFIG
     assert tools.FETCH_CONFIG.getint("DEFAULT", "DOWNLOAD_TIMEOUT") > 0
@@ -842,7 +845,7 @@ def test_feed_error_status_returns_failure(tools, monkeypatch):
         tools: A ToolHarness for a new run with one article link allowed.
         monkeypatch: Pytest fixture that replaces attributes for the length of the test.
     """
-    monkeypatch.setattr(tools, "fetch_response", lambda url, **kwargs: SimpleNamespace(url=url, status=500, data=b"oops"))
+    monkeypatch.setattr(tools.module, "fetch_response", lambda url, **kwargs: SimpleNamespace(url=url, status=500, data=b"oops"))
     assert tools.get_headlines.invoke({"feed_url": tools.ALLOWED_FEEDS[0]}).startswith("FETCH_FAILED")
 
 
@@ -871,7 +874,7 @@ def test_cut_off_feed_is_downloaded_again(tools, monkeypatch):
         requests.append(url)
         return SimpleNamespace(url=url, status=200, data=bodies[len(requests) - 1])
 
-    monkeypatch.setattr(tools, "fetch_response", fake_fetch_response)
+    monkeypatch.setattr(tools.module, "fetch_response", fake_fetch_response)
     result = tools.get_headlines.invoke({"feed_url": tools.ALLOWED_FEEDS[0]})
     assert "Title: Talks resume" in result
     assert len(requests) == 2
@@ -899,7 +902,7 @@ def test_feed_that_stays_unparseable_returns_failure(tools, monkeypatch):
         requests.append(url)
         return SimpleNamespace(url=url, status=200, data=b"<rss><chan")
 
-    monkeypatch.setattr(tools, "fetch_response", fake_fetch_response)
+    monkeypatch.setattr(tools.module, "fetch_response", fake_fetch_response)
     assert tools.get_headlines.invoke({"feed_url": tools.ALLOWED_FEEDS[0]}).startswith("FETCH_FAILED")
     assert len(requests) == 2
 
@@ -923,7 +926,7 @@ def test_failed_feed_download_is_not_repeated(tools, monkeypatch):
         """
         requests.append(url)
 
-    monkeypatch.setattr(tools, "fetch_response", fake_fetch_response)
+    monkeypatch.setattr(tools.module, "fetch_response", fake_fetch_response)
     tools.get_headlines.invoke({"feed_url": tools.ALLOWED_FEEDS[0]})
     assert len(requests) == 1
 
@@ -1270,7 +1273,7 @@ def test_flagged_article_stays_fenced_and_is_recorded(tools, monkeypatch):
     # Regression: flagged stories were dropped, which also lost genuine news that matched.
     text = "Researchers warned of pages telling chatbots to ignore all previous instructions."
     set_fetch_response(monkeypatch, tools, fake_response(ARTICLE_URL))
-    monkeypatch.setattr(tools, "extract", lambda html: text)
+    monkeypatch.setattr(tools.module, "extract", lambda html: text)
     result = tools.fetch_article.invoke({"url": ARTICLE_URL})
     assert result.startswith('<untrusted_content id="')
     assert text in result
@@ -1300,7 +1303,7 @@ def test_encoded_article_is_withheld_and_recorded(tools, monkeypatch):
     """
     # Regression: an encoded payload made the API refuse, which lost the whole briefing.
     set_fetch_response(monkeypatch, tools, fake_response(ARTICLE_URL))
-    monkeypatch.setattr(tools, "extract", lambda html: "Talks resumed. " + "QUJD" * 20)
+    monkeypatch.setattr(tools.module, "extract", lambda html: "Talks resumed. " + "QUJD" * 20)
     result = tools.fetch_article.invoke({"url": ARTICLE_URL})
     assert result.startswith("FETCH_FAILED")
     assert "QUJD" not in result
@@ -1338,7 +1341,7 @@ def test_article_text_the_model_never_reads_is_not_checked(tools, monkeypatch):
         tools.fetched.clear()
         tools.suspected_injections.clear()
         set_fetch_response(monkeypatch, tools, fake_response(ARTICLE_URL))
-        monkeypatch.setattr(tools, "extract", lambda html, text=article: text)
+        monkeypatch.setattr(tools.module, "extract", lambda html, text=article: text)
         result = tools.fetch_article.invoke({"url": ARTICLE_URL})
         assert result.startswith('<untrusted_content id="')
         assert encoded not in result
@@ -1367,7 +1370,7 @@ def test_article_empty_after_trimming_is_not_recorded_as_fetched(tools, monkeypa
     """
     # Regression: this counted as a fetched article, so citing it passed the eval.
     set_fetch_response(monkeypatch, tools, fake_response(ARTICLE_URL))
-    monkeypatch.setattr(tools, "extract", lambda html: "Published - 2 Nov 2026")
+    monkeypatch.setattr(tools.module, "extract", lambda html: "Published - 2 Nov 2026")
     assert tools.fetch_article.invoke({"url": ARTICLE_URL}).startswith("FETCH_FAILED")
     assert tools.fetched == {}
 
@@ -1471,7 +1474,7 @@ def test_feed_with_items_is_kept_when_the_second_download_fails(tools, monkeypat
     """
     # Regression: found in review. A failed retry threw away a first download that had items.
     responses = [SimpleNamespace(url=tools.ALLOWED_FEEDS[0], status=200, data=b"first"), None]
-    monkeypatch.setattr(tools, "fetch_response", lambda url, **kwargs: responses.pop(0))
+    monkeypatch.setattr(tools.module, "fetch_response", lambda url, **kwargs: responses.pop(0))
     entry = FeedParserDict(title="Talks resume", published="Mon, 02 Nov 2026 10:00:00 GMT", link=ARTICLE_URL, summary="S")
     monkeypatch.setattr(tools.feedparser, "parse", lambda data: FeedParserDict(entries=[entry], bozo=1))
     result = tools.get_headlines.invoke({"feed_url": tools.ALLOWED_FEEDS[0]})
