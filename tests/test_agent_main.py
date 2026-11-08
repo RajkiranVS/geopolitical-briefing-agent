@@ -473,6 +473,37 @@ def test_failed_fetches_stop_after_the_limit(tools, monkeypatch):
     assert all(result.startswith("FETCH_LIMIT_REACHED") for result in results[tools.MAX_FAILED_FETCHES:])
 
 
+def test_parallel_failing_fetches_cannot_pass_the_failure_limit(tools, monkeypatch):
+    """Checks that failing downloads running at once can't go past the failure limit.
+
+    Args:
+        tools: The agent module with its tool state reset and one article link allowed.
+        monkeypatch: Pytest fixture that replaces attributes for the length of the test.
+    """
+    # Regression: found in review. Failures were only counted after each download finished.
+    failing = tuple(f"https://www.bbc.com/news/world-{number}" for number in range(16))
+    urls, requests = allow_articles(monkeypatch, tools, 16, delay=0.2, failing=failing)
+    tools.failed_fetches.extend(["https://www.bbc.com/news/earlier"] * (tools.MAX_FAILED_FETCHES - 2))
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        list(pool.map(lambda url: tools.fetch_article.invoke({"url": url}), urls))
+    assert len(requests) == 2
+    assert len(tools.failed_fetches) == tools.MAX_FAILED_FETCHES
+
+
+def test_fetched_article_is_sent_again_without_downloading(tools, monkeypatch):
+    """Checks that asking for an article already read returns it without a new download.
+
+    Args:
+        tools: The agent module with its tool state reset and one article link allowed.
+        monkeypatch: Pytest fixture that replaces attributes for the length of the test.
+    """
+    # Regression: found in review. Each repeat downloaded the article again.
+    urls, requests = allow_articles(monkeypatch, tools, 1)
+    results = [tools.fetch_article.invoke({"url": urls[0]}) for _ in range(3)]
+    assert len(requests) == 1
+    assert all("Article text." in result and result.endswith(f"Source: {urls[0]}") for result in results)
+
+
 def test_crashing_download_counts_as_a_failed_fetch(tools, monkeypatch):
     """Checks that a download that raises still counts towards the failure limit.
 
