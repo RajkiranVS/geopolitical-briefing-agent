@@ -11,6 +11,7 @@ from briefing import (
     EMPTY_SECTION_PLACEHOLDER,
     BriefingItem,
     SubmitBriefing,
+    display_url,
     render_briefing,
 )
 from evals import (
@@ -555,6 +556,28 @@ def test_render_briefing_puts_each_source_after_its_claim():
 def test_render_briefing_says_none_when_there_are_no_notes():
     """Checks that an empty notes list is written as "none"."""
     assert render_briefing(make_briefing([("Leaders met.", URL)])).endswith("FETCH NOTES:\n- none\n")
+
+
+def test_render_briefing_shows_links_without_tracking_parameters():
+    """Checks that the shown link drops the query string, which the evals ignore anyway."""
+    # Regression: a BBC link was shown with ?at_medium=RSS&at_campaign=rss
+    text = render_briefing(make_briefing([("Leaders met.", f"{URL}?at_medium=RSS&at_campaign=rss#top")]))
+    assert f"- Leaders met. (Source: {URL})" in text.splitlines()
+
+
+def test_display_url_leaves_text_that_isnt_a_link_alone():
+    """Checks that a missing or malformed source is shown as given, so the eval failure is visible."""
+    assert display_url("") == ""
+    assert display_url("the BBC") == "the BBC"
+    assert display_url("http://[bad") == "http://[bad"
+
+
+def test_sources_by_site_counts_verified_citations():
+    """Checks the per-site count, which is reported without affecting the result."""
+    fetched = {URL: ARTICLE, OTHER_URL: ARTICLE}
+    report = evaluate(make_briefing([("Leaders met in Delhi.", URL), ("Leaders met in Delhi.", OTHER_URL)]), fetched=fetched)
+    assert report["sources_by_site"] == {"bbc.com": 1, "thehindu.com": 1}
+    assert report["passed"] is True
 
 
 # India section

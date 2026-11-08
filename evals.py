@@ -529,6 +529,11 @@ def run_evals(
     # A warning: one item from five fetched articles has dropped most of the reading. It isn't a
     # failure, because what the briefing does say is still checked.
     too_few_items = briefing is not None and len(items) < min(MIN_ITEMS, len(articles))
+    # Not a check: a briefing that mostly reads one site is worth seeing, but isn't wrong
+    sources_by_site: dict[str, int] = {}
+    for url in verified:
+        site = urlsplit(url).netloc.removeprefix("www.")
+        sources_by_site[site] = sources_by_site.get(site, 0) + 1
 
     # A briefing with nothing verified has proved nothing. Stale and undated stories are warnings:
     # feeds keep important stories for days, so failing on age would fail correct briefings.
@@ -556,6 +561,7 @@ def run_evals(
         "india_off_topic": india_off_topic,
         "repeated_items": repeated_items,
         "too_few_items": too_few_items,
+        "sources_by_site": sources_by_site,
         "stale": stale,
         "unknown_date": unknown_date,
         "suspected_injections": list(suspected_injections),
@@ -581,6 +587,8 @@ def run_evals(
     print(f"India items that don't mention India (warning): {len(india_off_topic)}")
     print(f"Repeated items (warning): {len(repeated_items)}")
     print(f"Fewer than {MIN_ITEMS} items, or than the articles fetched (warning): {'yes' if too_few_items else 'no'}")
+    sites = ", ".join(f"{site} {count}" for site, count in sorted(sources_by_site.items(), key=lambda pair: (-pair[1], pair[0])))
+    print(f"Verified citations by site: {sites or 'none'}")
     print(f"Stale news warnings (>72h): {len(stale)}")
     print(f"Unknown publish date warnings: {len(unknown_date)}")
     print(f"Suspected prompt injections: {len(suspected_injections)}")

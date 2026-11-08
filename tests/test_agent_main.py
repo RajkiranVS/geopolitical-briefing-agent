@@ -1916,3 +1916,49 @@ def test_feed_with_only_bad_links_has_no_usable_items(tools, monkeypatch):
         monkeypatch: Pytest fixture that replaces attributes for the length of the test.
     """
     assert headlines_for_links(tools, monkeypatch, ["https://ads.example.com/offer"]).endswith("had no usable items.")
+
+
+def test_key_development_repeating_an_india_item_is_dropped(agent_module, monkeypatch, tmp_path, caplog):
+    """Checks that a story in both sections from the same article is kept only in the India section.
+
+    Args:
+        agent_module: The agent module.
+        monkeypatch: Pytest fixture that replaces attributes for the length of the test.
+        tmp_path: Pytest fixture giving a temporary directory for the eval report.
+        caplog: Pytest fixture that captures log records.
+    """
+    # Regression: the model put the Hasina extradition story in both sections, from one article
+    other_url = "https://www.bbc.com/news/world-456"
+    final = briefing_message(
+        [("Dhaka asked Delhi to extradite her.", f"{ARTICLE_URL}?at_medium=RSS"), ("Talks were held.", other_url)],
+        india=[("Dhaka asked India to extradite her.", ARTICLE_URL)],
+    )
+    set_agent(monkeypatch, agent_module, final, fetched_urls=(ARTICLE_URL, other_url))
+    report_path = tmp_path / "report.json"
+    with caplog.at_level("WARNING"):
+        agent_module.main(["--report", str(report_path)])
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert [item["source_url"] for item in report["briefing"]["key_developments"]] == [other_url]
+    assert [item["claim"] for item in report["briefing"]["india"]] == ["Dhaka asked India to extradite her."]
+    assert [item["claim"] for item in report["dropped_india_repeats"]] == ["Dhaka asked Delhi to extradite her."]
+    assert "Dhaka asked Delhi" not in report["briefing_markdown"]
+    assert report["repeated_items"] == []
+    assert "repeats an India item" in caplog.text
+
+
+def test_items_without_a_source_are_not_dropped_as_repeats(agent_module):
+    """Checks that an empty source in the India section doesn't remove unsourced key developments.
+
+    Args:
+        agent_module: The agent module.
+    """
+    from briefing import BriefingItem, SubmitBriefing
+
+    briefing = SubmitBriefing(
+        key_developments=[BriefingItem(claim="Talks were held.", source_url="")],
+        india=[BriefingItem(claim="Leaders met in Delhi.", source_url="")],
+        fetch_notes=[],
+    )
+    kept, dropped = agent_module.drop_india_repeats(briefing)
+    assert len(kept.key_developments) == 1
+    assert dropped == []

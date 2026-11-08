@@ -35,7 +35,7 @@ from trafilatura import extract
 from trafilatura.downloads import fetch_response
 from trafilatura.settings import use_config
 
-from briefing import BRIEFING_TOOL, SubmitBriefing, render_briefing
+from briefing import BRIEFING_TOOL, BriefingItem, SubmitBriefing, render_briefing
 from evals import (
     DEFAULT_ALLOWED_DOMAINS,
     WITHHELD_INJECTION_SIGNS,
@@ -569,6 +569,25 @@ def find_briefing(messages: Sequence[BaseMessage]) -> SubmitBriefing | None:
         logger.exception("The submitted briefing didn't fit the schema")
         return None
 
+def drop_india_repeats(briefing: SubmitBriefing) -> tuple[SubmitBriefing, list[BriefingItem]]:
+    """Removes key developments whose article is also cited in the India section.
+
+    The schema asks for each development in one section only, but the model doesn't always follow
+    it. A shared source link is an unambiguous repeat, so the India copy is kept and the other dropped.
+
+    Args:
+        briefing: The briefing the model submitted.
+
+    Returns:
+        The briefing without the repeats, and the key developments that were dropped.
+    """
+    india_sources = {normalize_url(item.source_url.strip()) for item in briefing.india}
+    india_sources.discard("")
+    kept, dropped = [], []
+    for item in briefing.key_developments:
+        (dropped if normalize_url(item.source_url.strip()) in india_sources else kept).append(item)
+    return briefing.model_copy(update={"key_developments": kept}), dropped
+
 def build_agent(run: RunState, models: tuple | None = None):
     """Builds the agent for one run.
 
@@ -735,6 +754,12 @@ def main(argv: Sequence[str] = ()):
         messages = []
 
     briefing = find_briefing(messages)
+    dropped: list[BriefingItem] = []
+    if briefing is not None:
+        briefing, dropped = drop_india_repeats(briefing)
+    for item in dropped:
+        # Logged so it's visible how often the model ignores the one-section rule
+        logger.warning("Dropped a key development that repeats an India item from the same article: %s", item.source_url)
     briefing_text = render_briefing(briefing) if briefing else ""
     print("--- BRIEFING ---")
     print(briefing_text)
@@ -753,6 +778,7 @@ def main(argv: Sequence[str] = ()):
         "request": args.request,
         "fetched_urls": sorted(run.fetched),
         "briefing_markdown": briefing_text,
+        "dropped_india_repeats": [item.model_dump() for item in dropped],
     }
     report = run_evals(
         briefing, run.fetched, run.headline_meta,
