@@ -69,9 +69,10 @@ PAGE_LINE = re.compile(
     re.MULTILINE | re.IGNORECASE,
 )
 # India TV's "Also read:" line and the headline of another story on the very next line. The next line
-# goes only if it looks like a headline: under 150 characters, not ending in a full stop, a question mark
-# or an exclamation mark. A blank line or a sentence after the label may be the story, so it stays.
-ALSO_READ_BLOCK = re.compile(r"^Also read:?[ \t]*\n[^\n]{0,148}[^\n.!?]$", re.MULTILINE | re.IGNORECASE)
+# goes only if it looks like a headline: under 150 characters, and not ending like a sentence, in a full
+# stop, an exclamation mark or a closing quote such as `attack"` or `.”`. Headlines can be questions, so
+# a question mark doesn't keep a line. A blank line or a sentence after the label may be the story.
+ALSO_READ_BLOCK = re.compile(r"^Also read:?[ \t]*\n[^\n]{0,148}[^\n.!\"'”’]$", re.MULTILINE | re.IGNORECASE)
 # The same link written on one line, "Also read: <headline>", or the label left without a headline.
 ALSO_READ_LINE = re.compile(r"^Also read(?::[^\n]*|[ \t]*)$", re.MULTILINE | re.IGNORECASE)
 
@@ -469,11 +470,12 @@ def bind_models(model, tools: list) -> tuple:
         A tuple (tool_model, final_model). tool_model may call any tool, several at once, so fetches
         run in parallel. final_model must call SubmitBriefing and nothing else: with parallel calls off,
         the API can't attach a fetch to a forced submission, where it would never run. The other tools
-        stay defined because the message history contains calls to them.
+        stay defined because the message history contains calls to them. If thinking were turned on,
+        langchain-anthropic would drop the forced choice, but parallel calls would still be off.
     """
     all_tools = [*tools, SubmitBriefing]
-    forced = {"type": "tool", "name": BRIEFING_TOOL, "disable_parallel_tool_use": True}
-    return model.bind_tools(all_tools), model.bind_tools(all_tools, tool_choice=forced)
+    final_model = model.bind_tools(all_tools, tool_choice=BRIEFING_TOOL, parallel_tool_calls=False)
+    return model.bind_tools(all_tools), final_model
 
 def tool_error(tool_call: ToolCall, content: str) -> ToolMessage:
     """Builds the result for a tool call that didn't run.

@@ -1085,6 +1085,20 @@ def test_final_model_must_submit_and_keeps_the_other_tools(agent_module):
     # The message history contains tool calls, so all the tools must stay defined.
     assert len(tool_model.tools) == len(final_model.tools) == 3
     # The forced call can't come with other calls, which would never run; the tool model keeps parallel calls
+    assert final_model.kwargs == {"tool_choice": "SubmitBriefing", "parallel_tool_calls": False}
+    assert tool_model.kwargs == {}
+
+
+def test_forced_call_reaches_the_api_without_parallel_calls(agent_module):
+    """Checks what the real Anthropic binding sends: SubmitBriefing forced, with parallel calls off.
+
+    Args:
+        agent_module: The agent module.
+    """
+    from langchain_anthropic import ChatAnthropic
+
+    model = ChatAnthropic(model="claude-haiku-5-5", api_key="not-used")  # binding makes no API call
+    tool_model, final_model = agent_module.bind_models(model, agent_module.make_tools(agent_module.RunState()))
     assert final_model.kwargs["tool_choice"] == {"type": "tool", "name": "SubmitBriefing", "disable_parallel_tool_use": True}
     assert "tool_choice" not in tool_model.kwargs
 
@@ -1803,3 +1817,27 @@ def test_forced_response_with_other_calls_is_logged(agent_module, caplog):
     messages = scripted_agent(agent_module, tool_model, final_model).invoke([HumanMessage(content="Brief me")])
     assert agent_module.find_briefing(messages).key_developments[0].claim == "Leaders met."
     assert "The final response also called get_headlines; those calls were not run" in caplog.text
+
+
+def test_quoted_sentence_after_an_also_read_label_is_kept(agent_module):
+    """Checks that a line ending in a closing quote counts as a sentence of the story, not a headline.
+
+    Args:
+        agent_module: The agent module.
+    """
+    # Regression: found in review. A quote line has no full stop at its end, so it was taken for a headline.
+    for line in ('He said, "We will respond to this attack"', "He said, “We will respond.”"):
+        trimmed = agent_module.trim_article(f"The talks resumed.\nAlso read:\n{line}")
+        assert line in trimmed and "Also read" not in trimmed
+
+
+def test_question_headline_after_an_also_read_label_is_removed(agent_module):
+    """Checks that a headline ending in a question mark goes with its label, rather than staying as a stray line.
+
+    Args:
+        agent_module: The agent module.
+    """
+    # Regression: found in review. A question mark kept the line, so the other story's headline stayed.
+    trimmed = agent_module.trim_article("The talks resumed.\nAlso read:\nIs Iran ready for talks?\nThe ministers meet on Monday.")
+    assert "Is Iran ready" not in trimmed and "Also read" not in trimmed
+    assert "The ministers meet on Monday." in trimmed
