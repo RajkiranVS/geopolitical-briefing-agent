@@ -636,6 +636,31 @@ def test_single_words_and_uncited_items_are_not_quote_checked():
     )
     assert check_quotes(briefing, QUOTE_ARTICLE) == []
 
+def test_made_up_quote_in_single_quotes_fails():
+    """Checks that a quote in single quotes, straight or curly, is checked too."""
+    # Regression: found in review. Only double quotes were checked.
+    for quote in ("'the talks collapsed in disarray'", "‘the talks collapsed in disarray’"):
+        briefing = f"- The minister said {quote} on Monday. Source: {QUOTE_URL}"
+        assert len(check_quotes(briefing, QUOTE_ARTICLE)) == 1, quote
+    exact = f"- The minister called the talks 'frank and constructive'. Source: {QUOTE_URL}"
+    assert check_quotes(exact, QUOTE_ARTICLE) == []
+
+def test_apostrophes_and_short_single_quotes_are_not_quotes():
+    """Checks that apostrophes and one or two words in single quotes aren't checked as quotes."""
+    briefing = (
+        "- India's and Nepal's ministers didn't agree, the parties' leaders said, "
+        f"and India’s envoy gave 'no comment' on the 'reset'. Source: {QUOTE_URL}"
+    )
+    assert check_quotes(briefing, QUOTE_ARTICLE) == []
+
+def test_made_up_quote_in_a_heading_fails():
+    """Checks that a quote in a heading must appear in one of the fetched articles."""
+    # Regression: found in review. Headings aren't items, so their quotes were never checked.
+    briefing = f'## "Talks collapsed in disarray"\n- Leaders met. Source: {QUOTE_URL}\n'
+    assert len(check_quotes(briefing, QUOTE_ARTICLE)) == 1
+    real = f'## Minister calls talks "frank and constructive"\n- Leaders met. Source: {QUOTE_URL}\n'
+    assert check_quotes(real, QUOTE_ARTICLE) == []
+
 def test_unverified_citation_fails_alongside_verified_one():
     """Checks that one unverified citation fails a briefing with a verified one."""
     _, briefing, fetched, headline_meta = clean_inputs()

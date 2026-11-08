@@ -188,6 +188,8 @@ def tools(agent_module, monkeypatch):
     agent_module.fetched.clear()
     agent_module.headline_meta.clear()
     agent_module.suspected_injections.clear()
+    agent_module.fetch_attempts.clear()
+    agent_module.failed_fetches.clear()
     agent_module.headline_links.clear()
     agent_module.headline_links.add(ARTICLE_URL)
     monkeypatch.setattr(agent_module, "extract", lambda html: "Article text.")
@@ -439,6 +441,92 @@ def test_parallel_fetches_cannot_pass_the_limit(tools, monkeypatch):
     assert len(requests) == 5
     assert len(tools.fetched) == 5
     assert sum(result.startswith("FETCH_LIMIT_REACHED") for result in results) == 3
+    assert tools.fetches_in_progress == set()
+
+
+def test_failing_article_is_tried_at_most_twice(tools, monkeypatch):
+    """Checks that a link that keeps failing is downloaded only twice.
+
+    Args:
+        tools: The agent module with its tool state reset and one article link allowed.
+        monkeypatch: Pytest fixture that replaces attributes for the length of the test.
+    """
+    # Regression: found in review. The prompt allows one retry, but nothing enforced it.
+    urls, requests = allow_articles(monkeypatch, tools, 1, failing=("https://www.bbc.com/news/world-0",))
+    results = [tools.fetch_article.invoke({"url": urls[0]}) for _ in range(4)]
+    assert len(requests) == 2
+    assert "already been tried 2 times" in results[2]
+
+
+def test_failed_fetches_stop_after_the_limit(tools, monkeypatch):
+    """Checks that fetching stops after ten failed downloads, even of different links.
+
+    Args:
+        tools: The agent module with its tool state reset and one article link allowed.
+        monkeypatch: Pytest fixture that replaces attributes for the length of the test.
+    """
+    # Regression: found in review. 30 failing calls were all downloaded.
+    failing = tuple(f"https://www.bbc.com/news/world-{number}" for number in range(30))
+    urls, requests = allow_articles(monkeypatch, tools, 30, failing=failing)
+    results = [tools.fetch_article.invoke({"url": url}) for url in urls]
+    assert len(requests) == tools.MAX_FAILED_FETCHES
+    assert all(result.startswith("FETCH_LIMIT_REACHED") for result in results[tools.MAX_FAILED_FETCHES:])
+
+
+def test_parallel_failing_fetches_cannot_pass_the_failure_limit(tools, monkeypatch):
+    """Checks that failing downloads running at once can't go past the failure limit.
+
+    Args:
+        tools: The agent module with its tool state reset and one article link allowed.
+        monkeypatch: Pytest fixture that replaces attributes for the length of the test.
+    """
+    # Regression: found in review. Failures were only counted after each download finished.
+    failing = tuple(f"https://www.bbc.com/news/world-{number}" for number in range(16))
+    urls, requests = allow_articles(monkeypatch, tools, 16, delay=0.2, failing=failing)
+    tools.failed_fetches.extend(["https://www.bbc.com/news/earlier"] * (tools.MAX_FAILED_FETCHES - 2))
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        list(pool.map(lambda url: tools.fetch_article.invoke({"url": url}), urls))
+    assert len(requests) == 2
+    assert len(tools.failed_fetches) == tools.MAX_FAILED_FETCHES
+
+
+def test_fetched_article_is_sent_again_without_downloading(tools, monkeypatch):
+    """Checks that asking for an article already read returns it without a new download.
+
+    Args:
+        tools: The agent module with its tool state reset and one article link allowed.
+        monkeypatch: Pytest fixture that replaces attributes for the length of the test.
+    """
+    # Regression: found in review. Each repeat downloaded the article again.
+    urls, requests = allow_articles(monkeypatch, tools, 1)
+    results = [tools.fetch_article.invoke({"url": urls[0]}) for _ in range(3)]
+    assert len(requests) == 1
+    assert all("Article text." in result and result.endswith(f"Source: {urls[0]}") for result in results)
+
+
+def test_crashing_download_counts_as_a_failed_fetch(tools, monkeypatch):
+    """Checks that a download that raises still counts towards the failure limit.
+
+    Args:
+        tools: The agent module with its tool state reset and one article link allowed.
+        monkeypatch: Pytest fixture that replaces attributes for the length of the test.
+    """
+    def crash(url, **kwargs):
+        """Simulates a bug in the download.
+
+        Args:
+            url: The URL requested.
+            **kwargs: Download options, which are ignored.
+
+        Raises:
+            ConnectionError: Always.
+        """
+        raise ConnectionError("down")
+
+    monkeypatch.setattr(tools, "fetch_response", crash)
+    with pytest.raises(ConnectionError):
+        tools.fetch_article.invoke({"url": ARTICLE_URL})
+    assert tools.failed_fetches == [ARTICLE_URL]
     assert tools.fetches_in_progress == set()
 
 
