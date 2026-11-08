@@ -144,8 +144,9 @@ The system prompt asks for this format:
 | `check_quotes(briefing, fetched)` | Checks that every quote appears word for word in an article cited by the same item: two or more words in double quotes, or three or more in single quotes, straight or curly. Quotes in headings and label lines, which cite nothing, may come from any fetched article. Curly and straight quotes, dashes, case, whitespace and punctuation at the ends of a quote are ignored, and an ellipsis may stand for left-out text if the parts keep their order. Shorter quotes, and items that cite no fetched article, are skipped. | List of quotes not found |
 | `check_freshness(cited, headline_meta, max_hours=72, now=None)` | Flags stories older than `max_hours`, using RFC 2822 feed dates. | `(stale, unknown_date)` |
 | `check_allowed_sources(cited, allowed_domains)` | Flags citations whose domain, or parent domain, is not on the allow-list. | List of off-list URLs |
-| `check_grounding(item, article_text)` | A lightweight hallucination heuristic: numbers and capitalised words in an item must appear in the source article. | List of missing entities |
-| `run_evals(...)` | Runs the checks above (except `check_grounding`), prints a summary, and optionally writes `eval_report.json`. | Report `dict` |
+| `check_grounding(item, article_text)` | Finds the numbers and capitalised names in an item that the article doesn't contain. Case and plural endings are ignored, numbers match in any format or as words up to twenty and in tens, and sentence-start words and the cited outlets' names are skipped. | List of missing numbers and names |
+| `check_items_grounded(briefing, fetched)` | Runs `check_grounding` on each item against the articles it cites. A word counts as missing only if no cited article has it. | One entry per flagged item |
+| `run_evals(...)` | Runs the checks above, prints a summary, and optionally writes `eval_report.json`. | Report `dict` |
 
 ### Pass/Fail Criteria
 
@@ -156,7 +157,7 @@ A briefing **passes** only if all of these are true:
 - every bullet item and prose paragraph carries a citation (`uncited_items` is empty), **and**
 - every quote appears word for word in an article its item cites (`unverified_quotes` is empty).
 
-Stale stories, unknown dates and off-list domains are reported as **warnings**. They do not make the briefing fail.
+Stale stories, unknown dates, off-list domains and items that name things their article doesn't (`ungrounded`) are reported as **warnings**. They do not make the briefing fail.
 
 When the eval fails, the agent script exits with code 1.
 
@@ -168,6 +169,7 @@ When the eval fails, the agent script exits with code 1.
     "unverified": [],
     "uncited_items": [],
     "unverified_quotes": [],
+    "ungrounded": [],
     "stale": [],
     "unknown_date": [],
     "off_list": [],
@@ -442,13 +444,13 @@ The first live runs failed, and each failure was a real finding. Every fix lande
 
 ## Known Limitations
 
-- **Citations are checked for provenance, not accuracy.** The evals prove that every cited URL points to an article the agent actually fetched. They do not prove that the claim next to the citation is supported by that article. A bullet can cite a real, fetched article and still misstate what it says. Only quotes are checked against the article: `check_quotes` fails a quote that was changed or made up, but a paraphrase can say anything.
-- **Headings need no citation.** Prose paragraphs must cite a URL, like bullets, but a claim written as a heading, a bold title, a short line in capitals, a line of up to 120 characters ending in a colon, or an intro sentence starting "Here is" with no numbers (`## Iran seized a tanker`) still passes. A paragraph that holds only `Source:` and one link counts as the citation of the item before it. A closing line after the `FETCH NOTES:` section, such as "Let me know if you want more detail", makes the notes check fail, because the prompt says the notes must come last.
+- **Citations are checked for provenance, not accuracy.** The evals prove that every cited URL points to an article the agent actually fetched. They do not prove that the claim next to the citation is supported by that article. A bullet can cite a real, fetched article and still misstate what it says. Only quotes are checked against the article: `check_quotes` fails a quote that was changed or made up. For everything else, `ungrounded` warns when an item names a place, person or number its article doesn't contain, but a claim built from words the article does contain, such as the wrong country doing the right thing, passes. In 8 live runs on 8 November 2026 it flagged 6 of 24 cited items. All 6 were real details from outside the article, such as "Gulf of Oman" where the article said "the Gulf", and abbreviations such as CENTCOM.
+- **Headings need no citation.** Prose paragraphs must cite a URL, like bullets, but a claim written as a heading, a bold title, a short line in capitals, a line of up to 120 characters ending in a colon with an item or text after it, or an intro sentence starting "Here is" with no numbers (`## Iran seized a tanker`) still passes. So a claim such as "Iran has seized three tankers, Reuters said:" gets through when a bullet follows it, though it is flagged on its own. A paragraph that holds only `Source:` and one link counts as the citation of the item before it. A closing line after the `FETCH NOTES:` section, such as "Let me know if you want more detail", makes the notes check fail, because the prompt says the notes must come last.
 - **The `FETCH NOTES:` check is a word list.** Every line of the notes must name a source or a step of the run, so a plain news claim there fails the briefing. A claim that also names its source, such as "The BBC article says the talks collapsed", still passes. In the other direction, a real fetch problem worded without any of the listed words makes the briefing fail, which errs on the safe side. Replayed on 98 saved real briefings (8 live runs and 90 attack suite runs), this check and the prose check changed no result.
 - **India-focused.** The prompt and the Google News feed are set up for India; briefings for other countries would need the prompt and feed query changed.
 - **Fetch limits are per run, not per site.** The 5-article cap counts successful downloads, and a lock stops parallel calls from passing it. Each link may be downloaded twice, as the prompt's one retry allows, an article already read is sent again without a new download, and the run stops fetching after 10 failed downloads, counting downloads still running. In 8 live runs on 8 November 2026 at most 2 downloads failed.
 - **The quote check rests on little data.** In 8 live runs on 8 November 2026 the model quoted only 3 times, and all 3 passed once punctuation inside the quotation marks was ignored. Quotes are compared with the text the model read, which is the article cut to 4,000 characters, so a real quote from later in the article fails. A quote in a heading cites nothing, so it passes if any fetched article contains it, even an unrelated one.
-- **`check_grounding` is a heuristic.** It matches surface tokens (numbers and capitalised words), so paraphrases or differences in number formatting can produce false positives. It is also not called by `run_evals`.
+- **`check_grounding` is a heuristic.** It matches surface tokens, so a name the article spells differently, or a number given as a percentage in one and a fraction in the other, is flagged. That is why it only warns.
 - **Prompt injection can be reduced, not eliminated.** The tool restrictions hold even if the model is fooled, but only the model's judgement stops a false claim from reaching the briefing. A planted "correction" in a real article can't be told apart from a genuine one. The text screen is easy to reword around, and it also flags ordinary news that uses similar wording, so a `suspected_injections` entry is a prompt to look, not proof of an attack. If the API refuses because of fetched content, the run reports that and exits 1 with no briefing.
 - **Redirects are checked after they happen.** The tools discard content from a redirect off the allowlist, but the request to that host has already been made. `trafilatura` blocks private addresses before connecting, for both tools.
 - **Google News links are redirects.** Google News RSS items point to `news.google.com` URLs rather than to the publisher, which is why `news.google.com` is on the default allow-list. `trafilatura` usually can't follow these redirects, so `fetch_article` typically returns `FETCH_FAILED` for Google News items. Because the agent only reports stories it fetched, the Google News feed rarely contributes to the briefing.
@@ -462,7 +464,7 @@ The first live runs failed, and each failure was a real finding. Every fix lande
 
 ## Roadmap
 
-- **Per-item grounding.** `check_quotes` covers quotes only. The next step toward checking accuracy is to run a grounding check on each item against the article it cites, as a warning first, and measure how often it fires on correct briefings before it can fail a run. `check_grounding` is a starting point, but it matches surface tokens and needs case-insensitive matching and number normalisation first.
+- **Decide whether grounding should fail a run.** `ungrounded` is a warning. Over more live runs, count how often it flags a detail that is wrong rather than merely outside the article. If the model often adds outside details, a prompt rule against them may help more than failing the run.
 
 ---
 

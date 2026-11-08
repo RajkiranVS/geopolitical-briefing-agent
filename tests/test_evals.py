@@ -9,6 +9,8 @@ from evals import (
     EMPTY_SECTION_PLACEHOLDER,
     check_cited_were_fetched,
     check_freshness,
+    check_grounding,
+    check_items_grounded,
     check_quotes,
     check_uncited_items,
     extract_citations,
@@ -742,6 +744,71 @@ def test_uncited_sentence_is_still_flagged_beside_labels():
     # Short lowercase and numbered sentences aren't labels either
     for item in ("Iran seized a tanker", "Here is why Iran seized 3 tankers."):
         assert check_uncited_items(f"{item}\n") == [item], item
+
+def test_claim_ending_in_a_colon_is_flagged_when_nothing_follows():
+    """Checks that a line ending in a colon is only a label when content follows it."""
+    # Regression: found in review. Any line of up to 120 characters ending in a colon skipped the citation check.
+    claim = "Iran has seized three tankers, Reuters said:"
+    url = "https://www.thehindu.com/news/article1.ece"
+    for briefing in (f"{claim}\n", f"{claim}\n\n## India\n- Leaders met. Source: {url}\n", f"{claim}\n\nFETCH NOTES: none\n"):
+        assert claim in check_uncited_items(briefing), briefing
+
+def test_colon_labels_before_content_still_pass():
+    """Checks that real labels followed by an item or a placeholder still need no citation."""
+    url = "https://www.thehindu.com/news/article1.ece"
+    for briefing in (
+        f"Key developments:\n- Leaders met. Source: {url}\n",
+        f"India:\n\n{EMPTY_SECTION_PLACEHOLDER}\n",
+        f"Here is a summary of today's news from the fetched articles:\n\n- Leaders met. Source: {url}\n",
+    ):
+        assert check_uncited_items(briefing) == [], briefing
+
+def test_claim_ending_in_a_colon_in_the_notes_is_flagged():
+    """Checks that the colon rule also applies inside the fetch notes."""
+    # Regression: found in review. Inside the notes, any line ending in a colon was skipped.
+    claim = "Iran has seized three tankers, Reuters said:"
+    url = "https://www.thehindu.com/news/article1.ece"
+    briefing = f"## Asia\n- Leaders met. Source: {url}\n\nFETCH NOTES:\n- The BBC feed returned no entries.\n{claim}\n"
+    assert claim in " ".join(check_uncited_items(briefing))
+    with_sub_heading = f"## Asia\n- Leaders met. Source: {url}\n\nFETCH NOTES:\nFeed problems:\n- The BBC feed returned no entries.\n"
+    assert check_uncited_items(with_sub_heading) == []
+
+
+# check_grounding and check_items_grounded
+
+GROUNDING_URL = "https://www.bbc.com/news/world-123"
+GROUNDING_ARTICLE = "Two oil tankers caught fire in the Gulf, the Revolutionary Guards said. Ministers met 5,000 delegates."
+
+def test_grounding_ignores_case_plurals_number_formats_and_sentence_starts():
+    """Checks that differences in case, plural endings and number formatting aren't flagged."""
+    # Regression: found in review. Case-sensitive matching flagged sentence starts and "5,000" against "5000".
+    item = f"- The Revolutionary Guards said 2 tankers caught fire. This followed talks; Minister met 5000 delegates. Source: {GROUNDING_URL}"
+    assert check_grounding(item, GROUNDING_ARTICLE) == []
+
+def test_grounding_flags_names_and_numbers_the_article_lacks():
+    """Checks that a place or number the article doesn't contain is reported."""
+    item = f"- Three tankers caught fire in the Gulf of Oman. Source: {GROUNDING_URL}"
+    assert check_grounding(item, GROUNDING_ARTICLE) == ["3", "Oman"]
+
+def test_ungrounded_item_is_a_warning_not_a_failure():
+    """Checks that the grounding result is reported without failing the briefing."""
+    item = f"- Two tankers caught fire in the Gulf of Oman. Source: {GROUNDING_URL}"
+    report = run_evals(f"## Gulf\n{item}\n", {GROUNDING_URL: GROUNDING_ARTICLE}, {}, report_path=None, now=NOW)
+    assert report["ungrounded"] == [f"{item[:80]}: not in the cited article: Oman"]
+    assert report["passed"] is True
+
+def test_grounding_uses_only_the_cited_articles():
+    """Checks that a name is looked up in the articles its item cites, not in every fetched article."""
+    other = "https://www.thehindu.com/news/article1.ece"
+    articles = {GROUNDING_URL: GROUNDING_ARTICLE, other: "Talks were held in Oman."}
+    briefing = f"- Tankers caught fire in the Gulf of Oman. Source: {GROUNDING_URL}\n"
+    assert len(check_items_grounded(briefing, articles)) == 1
+
+def test_grounding_ignores_list_numbers_and_the_word_one():
+    """Checks that a numbered list marker and "one" used as a pronoun aren't read as facts."""
+    # Regression: found in review. "1." and "one" were reported as numbers missing from the article.
+    item = f"1. One of the tankers caught fire in the Gulf. Source: {GROUNDING_URL}"
+    assert check_grounding(item, GROUNDING_ARTICLE) == []
 
 def test_bold_marker_with_colon_inside_and_bullets_accepted():
     """Checks that notes after a marker with the wrapper closing after the colon are recognised."""
