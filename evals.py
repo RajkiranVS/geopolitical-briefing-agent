@@ -37,6 +37,16 @@ FETCH_PROBLEM_WORDS = re.compile(
 # A note that only says nothing went wrong, as in "No issues." It must be the whole note, so a
 # claim such as "Iran faced no problems at the border" isn't accepted.
 NO_PROBLEMS_NOTE = re.compile(r'no\s+(issues?|problems?|errors?)(\s+(to\s+report|found|encountered))?', re.IGNORECASE)
+# A fetch note should name something that went wrong. "Problems" and "issues" aren't on the list,
+# because notes such as "read without problems" use them to say nothing went wrong.
+FAILURE_WORDS = re.compile(
+    # A status code counts only after a word such as "returned" or "HTTP", so "450 words" isn't one.
+    # FETCH_\w+ is listed because the underscore in FETCH_FAILED stops "fail" from matching there.
+    r"\b(fail\w*|fetch_\w+|error\w*|(?:http|status|code|returned|gave|got|an?)\W{1,3}[45]\d\d|forbidden|"
+    r"not found|time[sd]?\s?out|withheld|ignored|none|empty|truncated|cut off|could not|couldn't|cannot|"
+    r"can't|unable|unavailable|unreadable|refused|blocked|redirect\w*)\b",
+    re.IGNORECASE,
+)
 
 # Two items are the same item when most of the words of the shorter one are also in the other. In 26
 # live briefings no two items shared more than 23 per cent, so 60 per cent leaves a wide margin.
@@ -503,6 +513,9 @@ def run_evals(
     # Also a warning: a repeat wastes a slot, but each copy still cites what it says
     repeated_items = check_repeated_items(briefing) if briefing else []
     notes_with_news = check_fetch_notes(briefing.fetch_notes) if briefing else []
+    # A warning: a note that names no failure, such as which feeds a story came from, isn't a fetch
+    # problem, and it can carry story names past check_fetch_notes by mentioning a feed
+    notes_without_failure = [note for note in briefing.fetch_notes if not FAILURE_WORDS.search(note)] if briefing else []
 
     # A briefing with nothing verified has proved nothing. Stale and undated stories are warnings:
     # feeds keep important stories for days, so failing on age would fail correct briefings.
@@ -524,6 +537,7 @@ def run_evals(
         "uncited_items": uncited_items,
         "unverified_quotes": unverified_quotes,
         "notes_with_news": notes_with_news,
+        "notes_without_failure": notes_without_failure,
         "off_list": off_list,
         "ungrounded": ungrounded,
         "india_off_topic": india_off_topic,
@@ -547,6 +561,7 @@ def run_evals(
     print(f"Items without a source: {len(uncited_items)}")
     print(f"Quotes not found in the cited article: {len(unverified_quotes)}")
     print(f"Fetch notes that aren't about the run: {len(notes_with_news)}")
+    print(f"Fetch notes that name no failure (warning): {len(notes_without_failure)}")
     print(f"Out of Bounds Domains: {len(off_list)}")
     print(f"Items naming things their article doesn't (warning): {len(ungrounded)}")
     print(f"India items that don't mention India (warning): {len(india_off_topic)}")

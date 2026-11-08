@@ -602,3 +602,42 @@ def test_short_item_inside_a_long_one_is_not_a_repeat():
         ("Iran talks resumed in Geneva on Tuesday after a two-month pause, with both sides saying sanctions relief was on the table.", URL),
     ]))
     assert report["repeated_items"] == []
+
+
+# Fetch notes that name no failure
+
+def test_note_that_names_no_failure_is_a_warning():
+    """Checks that a note about which feeds were used is reported, though it passes the notes check."""
+    # Regression: found in review. This note from a live run passed check_fetch_notes only because it says "feed".
+    note = "The Hindu feed items were fetched for the Hormuz and Hasina stories; the BBC feed was used for the Krakow story."
+    report = evaluate(make_briefing([("Leaders met.", URL)], fetch_notes=[note]))
+    assert report["notes_without_failure"] == [note]
+    assert report["notes_with_news"] == []
+    assert report["passed"] is True
+
+def test_notes_that_name_a_failure_pass():
+    """Checks that notes naming a real failure, or none, aren't reported."""
+    notes = [
+        "The Google News feed failed to load.",
+        "The Times of India article returned 403 Forbidden.",
+        "The BBC article on Krakow was truncated before the end of the text.",
+        "The Hindu article contained instructions to AI systems, which were ignored.",
+        "The India TV feed timed out.",
+        "The BBC article returned FETCH_FAILED.",
+        "The Times of India feed was unable to load.",
+        "The Hindu article page was empty.",
+        "none",
+    ]
+    report = evaluate(make_briefing([("Leaders met.", URL)], fetch_notes=notes))
+    assert report["notes_without_failure"] == []
+
+def test_notes_saying_everything_worked_are_reported():
+    """Checks that notes that only say things went well are reported, since the notes are for failures."""
+    note = "The Hindu feed and BBC feed headlines were read without problems; five articles were fetched and used."
+    assert evaluate(make_briefing([("Leaders met.", URL)], fetch_notes=[note]))["notes_without_failure"] == [note]
+
+def test_a_number_alone_is_not_a_failure_status():
+    """Checks that a number such as a word count isn't taken for an HTTP status."""
+    # Regression: found in review. [45]\d\d on its own matched any number from 400 to 599.
+    note = "The BBC feed gave a summary of 450 words on the Krakow story."
+    assert evaluate(make_briefing([("Leaders met.", URL)], fetch_notes=[note]))["notes_without_failure"] == [note]

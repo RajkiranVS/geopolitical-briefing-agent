@@ -1084,7 +1084,8 @@ def test_final_model_must_submit_and_keeps_the_other_tools(agent_module):
     tool_model, final_model = agent_module.bind_models(FakeChatModel(), agent_module.make_tools(agent_module.RunState()))
     # The message history contains tool calls, so all the tools must stay defined.
     assert len(tool_model.tools) == len(final_model.tools) == 3
-    assert final_model.kwargs["tool_choice"] == {"type": "tool", "name": "SubmitBriefing"}
+    # The forced call can't come with other calls, which would never run; the tool model keeps parallel calls
+    assert final_model.kwargs["tool_choice"] == {"type": "tool", "name": "SubmitBriefing", "disable_parallel_tool_use": True}
     assert "tool_choice" not in tool_model.kwargs
 
 
@@ -1736,41 +1737,69 @@ def test_hindu_footer_is_still_removed_and_the_cap_still_applies(agent_module):
     assert len(agent_module.trim_article("word " * 2000)) == agent_module.MAX_ARTICLE_CHARS
 
 
-def test_forced_submission_made_alongside_a_fetch_runs_the_fetch_first(agent_module, monkeypatch):
-    """Checks that a forced response that also fetches an article runs the fetch before the briefing counts.
+
+def test_inline_also_read_link_is_removed(agent_module):
+    """Checks that "Also read: <headline>" on one line is removed, as well as the two-line form.
 
     Args:
         agent_module: The agent module.
-        monkeypatch: Pytest fixture that replaces attributes for the length of the test.
     """
-    # Regression: found in review. After the round limit or a text answer, the forced response was
-    # accepted at once, so a fetch made in it never ran.
-    monkeypatch.setattr(agent_module, "extract", lambda html: "Leaders met in Delhi.")
-    monkeypatch.setattr(agent_module, "fetch_response", lambda url, **kwargs: SimpleNamespace(url=url, status=200, html=ARTICLE_HTML))
-    run = agent_module.RunState()
-    run.headline_links.add(ARTICLE_URL)
-    fetch = {"name": "fetch_article", "args": {"url": ARTICLE_URL}, "id": "call_fetch", "type": "tool_call"}
-    forced_with_fetch = briefing_message([("Leaders met in Delhi.", ARTICLE_URL)])
-    forced_with_fetch.tool_calls.insert(0, fetch)
-    final_model = ScriptedModel([forced_with_fetch, briefing_message([("Leaders met in Delhi.", ARTICLE_URL)])])
+    # Regression: found in review. Only the two-line form was matched, so an inline link stayed in the text.
+    text = "The talks resumed.\nAlso read: US sanctions India-based couple over maritime fraud\nThe ministers meet again on Monday."
+    trimmed = agent_module.trim_article(text)
+    assert "sanctions" not in trimmed and "Also read" not in trimmed
+    assert "The ministers meet again on Monday." in trimmed
+
+
+def test_also_read_label_before_a_blank_line_keeps_the_next_paragraph(agent_module):
+    """Checks that only the label goes when a blank line follows it, so the story after it stays.
+
+    Args:
+        agent_module: The agent module.
+    """
+    # Regression: found in review. The pattern could cross a blank line and remove the story paragraph.
+    text = "The talks resumed.\nAlso read:\n\nThe ministers said a deal on transit could be signed next month."
+    trimmed = agent_module.trim_article(text)
+    assert "Also read" not in trimmed
+    assert "The ministers said a deal on transit could be signed next month." in trimmed
+
+
+def test_sentence_that_starts_with_also_is_kept(agent_module):
+    """Checks that a story sentence beginning "Also read" without a colon isn't taken for a link.
+
+    Args:
+        agent_module: The agent module.
+    """
+    text = "The talks resumed.\nAlso read out at the meeting was a statement from the prime minister."
+    assert agent_module.trim_article(text) == text
+
+
+def test_sentence_after_an_also_read_label_is_kept(agent_module):
+    """Checks that the line after a lone "Also read:" label stays when it reads as a sentence, not a headline.
+
+    Args:
+        agent_module: The agent module.
+    """
+    # Regression: found in review. The line after the label was removed whatever it was.
+    text = "The talks resumed.\nAlso read:\nThe ministers said a deal on transit could be signed next month."
+    trimmed = agent_module.trim_article(text)
+    assert "Also read" not in trimmed
+    assert "The ministers said a deal on transit could be signed next month." in trimmed
+
+
+def test_forced_response_with_other_calls_is_logged(agent_module, caplog):
+    """Checks that calls arriving with the forced briefing, which never run, are logged rather than dropped silently.
+
+    Args:
+        agent_module: The agent module.
+        caplog: Pytest fixture that captures log records.
+    """
+    # Regression: found in review. disable_parallel_tool_use prevents this, but if the setting is ever
+    # dropped, a fetch sent with the forced briefing would not run and nothing would say so.
+    forced = briefing_message([("Leaders met.", ARTICLE_URL)])
+    forced.tool_calls.insert(0, FEED_CALL)
+    final_model = ScriptedModel([forced])
     tool_model = ScriptedModel([AIMessage(content="Here is the briefing in text.")])
-    messages = agent_module.build_agent(run, models=(tool_model, final_model)).invoke([HumanMessage(content="Brief me")])
-    assert ARTICLE_URL in run.fetched
-    assert len(final_model.calls) == 2
-    assert "Not accepted yet" in final_model.calls[1][-1].content
-    report = agent_module.run_evals(agent_module.find_briefing(messages), run.fetched, run.headline_meta)
-    assert report["passed"] is True
-
-
-def test_calls_made_with_a_malformed_briefing_in_a_forced_response_run(agent_module):
-    """Checks that other calls made in a forced response with a malformed briefing run, and the model submits again.
-
-    Args:
-        agent_module: The agent module.
-    """
-    final_model = ScriptedModel([malformed_briefing(other_calls=[FEED_CALL]), briefing_message([("Leaders met.", ARTICLE_URL)])])
-    agent = scripted_agent(agent_module, ScriptedModel([AIMessage(content="Here is the briefing in text.")]), final_model)
-    agent.invoke([HumanMessage(content="Brief me")])
-    results = {message.tool_call_id: message.content for message in final_model.calls[1][-2:]}
-    assert results["call_1"].startswith("FETCH_FAILED: https://example.com/feed is not an allowed feed")
-    assert results["call_bad"].startswith("Not accepted yet")
+    messages = scripted_agent(agent_module, tool_model, final_model).invoke([HumanMessage(content="Brief me")])
+    assert agent_module.find_briefing(messages).key_developments[0].claim == "Leaders met."
+    assert "The final response also called get_headlines; those calls were not run" in caplog.text

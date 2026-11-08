@@ -68,8 +68,12 @@ PAGE_LINE = re.compile(
     r"^(?:- Published|\(With inputs from [^)\n]*\)|Additional reporting by [^\n]*|Images? Courtesy:[^\n]*)[ \t]*$",
     re.MULTILINE | re.IGNORECASE,
 )
-# India TV's "Also read:" line and the headline of another story that follows it.
-ALSO_READ_BLOCK = re.compile(r"^Also read:?[ \t]*\n\s*[^\n]*$", re.MULTILINE | re.IGNORECASE)
+# India TV's "Also read:" line and the headline of another story on the very next line. The next line
+# goes only if it looks like a headline: under 150 characters, not ending in a full stop, a question mark
+# or an exclamation mark. A blank line or a sentence after the label may be the story, so it stays.
+ALSO_READ_BLOCK = re.compile(r"^Also read:?[ \t]*\n[^\n]{0,148}[^\n.!?]$", re.MULTILINE | re.IGNORECASE)
+# The same link written on one line, "Also read: <headline>", or the label left without a headline.
+ALSO_READ_LINE = re.compile(r"^Also read(?::[^\n]*|[ \t]*)$", re.MULTILINE | re.IGNORECASE)
 
 MAX_HEADLINES = 15
 # Some feeds send a gzip file inside gzip encoding, so the body is still compressed after download.
@@ -174,6 +178,7 @@ def trim_article(text: str) -> str:
         The trimmed article text.
     """
     text = ALSO_READ_BLOCK.sub("", text)
+    text = ALSO_READ_LINE.sub("", text)
     text = PAGE_LINE.sub("", text)
     marker = text.find("Published -")
     if marker != -1:
@@ -461,11 +466,14 @@ def bind_models(model, tools: list) -> tuple:
         tools: The run's tools from make_tools.
 
     Returns:
-        A tuple (tool_model, final_model). tool_model may call any tool. final_model must call
-        SubmitBriefing; the other tools stay defined because the message history contains calls to them.
+        A tuple (tool_model, final_model). tool_model may call any tool, several at once, so fetches
+        run in parallel. final_model must call SubmitBriefing and nothing else: with parallel calls off,
+        the API can't attach a fetch to a forced submission, where it would never run. The other tools
+        stay defined because the message history contains calls to them.
     """
     all_tools = [*tools, SubmitBriefing]
-    return model.bind_tools(all_tools), model.bind_tools(all_tools, tool_choice={"type": "tool", "name": BRIEFING_TOOL})
+    forced = {"type": "tool", "name": BRIEFING_TOOL, "disable_parallel_tool_use": True}
+    return model.bind_tools(all_tools), model.bind_tools(all_tools, tool_choice=forced)
 
 def tool_error(tool_call: ToolCall, content: str) -> ToolMessage:
     """Builds the result for a tool call that didn't run.
@@ -638,12 +646,6 @@ def build_agent(run: RunState, models: tuple | None = None):
             messages = cast(list[BaseMessage], add_messages(list(messages), [model_response, *answer_calls(model_response, EARLY_SUBMISSION)]))
             model_response = call_llm(messages).result()
 
-        # A forced response can also come with other calls, such as a fetch for an article the
-        # briefing cites. They run, and the model must submit once more, so their results count.
-        if briefing_call(model_response) and len(model_response.tool_calls) > 1:
-            messages = cast(list[BaseMessage], add_messages(list(messages), [model_response, *answer_calls(model_response, EARLY_SUBMISSION)]))
-            model_response = call_llm(messages, must_submit=True).result()
-
         # A briefing that doesn't fit the schema would lose all the reading done so far, so the
         # model gets the errors and one more try. Only one, so a model that keeps failing can't loop.
         call = briefing_call(model_response)
@@ -652,6 +654,12 @@ def build_agent(run: RunState, models: tuple | None = None):
             reply = f"{BRIEFING_TOOL} didn't fit the schema: {error} Call {BRIEFING_TOOL} again with valid fields."
             messages = cast(list[BaseMessage], add_messages(list(messages), [model_response, *answer_calls(model_response, reply)]))
             model_response = call_llm(messages, must_submit=True).result()
+        # A forced call can't carry other calls while the API honours disable_parallel_tool_use. If it
+        # ever does, those calls haven't run, and the evals will fail any citation they were meant to cover.
+        submitted = briefing_call(model_response)
+        unanswered = [tool_call["name"] for tool_call in model_response.tool_calls if tool_call is not submitted]
+        if unanswered:
+            logger.warning("The final response also called %s; those calls were not run", ", ".join(unanswered))
         return cast(list[BaseMessage], add_messages(list(messages), model_response))
 
     return agent
