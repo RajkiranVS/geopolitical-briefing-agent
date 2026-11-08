@@ -763,6 +763,16 @@ def test_colon_labels_before_content_still_pass():
     ):
         assert check_uncited_items(briefing) == [], briefing
 
+def test_claim_ending_in_a_colon_in_the_notes_is_flagged():
+    """Checks that the colon rule also applies inside the fetch notes."""
+    # Regression: found in review. Inside the notes, any line ending in a colon was skipped.
+    claim = "Iran has seized three tankers, Reuters said:"
+    url = "https://www.thehindu.com/news/article1.ece"
+    briefing = f"## Asia\n- Leaders met. Source: {url}\n\nFETCH NOTES:\n- The BBC feed returned no entries.\n{claim}\n"
+    assert claim in " ".join(check_uncited_items(briefing))
+    with_sub_heading = f"## Asia\n- Leaders met. Source: {url}\n\nFETCH NOTES:\nFeed problems:\n- The BBC feed returned no entries.\n"
+    assert check_uncited_items(with_sub_heading) == []
+
 
 # check_grounding and check_items_grounded
 
@@ -793,6 +803,12 @@ def test_grounding_uses_only_the_cited_articles():
     articles = {GROUNDING_URL: GROUNDING_ARTICLE, other: "Talks were held in Oman."}
     briefing = f"- Tankers caught fire in the Gulf of Oman. Source: {GROUNDING_URL}\n"
     assert len(check_items_grounded(briefing, articles)) == 1
+
+def test_grounding_ignores_list_numbers_and_the_word_one():
+    """Checks that a numbered list marker and "one" used as a pronoun aren't read as facts."""
+    # Regression: found in review. "1." and "one" were reported as numbers missing from the article.
+    item = f"1. One of the tankers caught fire in the Gulf. Source: {GROUNDING_URL}"
+    assert check_grounding(item, GROUNDING_ARTICLE) == []
 
 def test_bold_marker_with_colon_inside_and_bullets_accepted():
     """Checks that notes after a marker with the wrapper closing after the colon are recognised."""

@@ -57,13 +57,15 @@ NUMBER_WORDS = {
         "nineteen", "twenty",
     ])
 } | {"thirty": "30", "forty": "40", "fifty": "50", "sixty": "60", "seventy": "70", "eighty": "80", "ninety": "90"}
+# "one" is usually a pronoun, as in "one of the talks", so it isn't read as a number.
+del NUMBER_WORDS["one"]
 # Capitalised words that aren't facts about the story: labels, the outlets the briefing cites, and
 # common words that are only capitalised because they start a sentence.
 GROUNDING_IGNORED_WORDS = {
     "source", "bbc", "hindu", "google", "new", "according", "key", "development",
     "the", "this", "that", "these", "those", "its", "it", "he", "she", "they", "we", "his", "her", "their",
     "per", "in", "on", "at", "as", "an", "and", "but", "also", "while", "after", "before", "however",
-    "for", "from", "with", "by", "of", "to", "no", "not", "both", "all", "some", "other", "there",
+    "for", "from", "with", "by", "of", "to", "no", "not", "both", "all", "some", "other", "there", "one",
 }
 # A quote on one line, in double quotes (groups 1 and 2) or single quotes (groups 3 and 4), straight
 # or curly. A single quote mark only opens a quote after a non-letter and only closes one before a
@@ -217,9 +219,13 @@ def only_describes_fetch_problems(notes: str) -> bool:
     Returns:
         True if no line looks like a news claim.
     """
-    for line in notes.splitlines():
+    lines = notes.splitlines()
+    for number, line in enumerate(lines):
         stripped = line.strip()
-        if not stripped or MARKUP_LABEL_LINE.match(stripped) or TEXT_LABEL_LINE.match(stripped) or COLON_LABEL_LINE.match(stripped):
+        if not stripped or MARKUP_LABEL_LINE.match(stripped) or TEXT_LABEL_LINE.match(stripped):
+            continue
+        # As in the body, a line ending in a colon is only a sub-heading when something follows it
+        if COLON_LABEL_LINE.match(stripped) and introduces_content(lines[number + 1:]):
             continue
         line_text = LIST_ITEM_START.sub('', stripped)
         if not FETCH_PROBLEM_WORDS.search(line_text) and not NO_PROBLEMS_LINE.fullmatch(line_text.strip(' *_.!')):
@@ -582,7 +588,8 @@ def check_grounding(item: str, article_text: str) -> list[str]:
     Returns:
         The numbers and names missing from the article; empty if all are there.
     """
-    text = URL_IN_TEXT.sub(" ", item)
+    # The list marker, such as "1.", is numbering, not a fact
+    text = URL_IN_TEXT.sub(" ", LIST_ITEM_START.sub("", item.strip()))
     article = normalize_quote_text(article_text)
     missing = sorted(grounding_numbers(text) - grounding_numbers(article))
     for word in dict.fromkeys(re.findall(r"\b[A-Z][A-Za-z]+\b", text)):
