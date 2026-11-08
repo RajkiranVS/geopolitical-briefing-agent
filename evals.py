@@ -10,7 +10,7 @@ import email.utils
 import json
 import re
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from urllib.parse import urlsplit
 
 from briefing import SubmitBriefing
@@ -52,6 +52,10 @@ FAILURE_WORDS = re.compile(
     r"(?:had|has|returned|gave|got|with|contained|yielded)\s+no\s+(?:items|headlines|articles|text|content))\b",
     re.IGNORECASE,
 )
+
+# The schema asks for 3 to 5 key developments, fewer if fewer articles were fetched. A briefing with
+# fewer items than this, counting both sections, gets a warning.
+MIN_ITEMS = 3
 
 # Two items are the same item when most of the words of the shorter one are also in the other. In 26
 # live briefings no two items shared more than 23 per cent, so 60 per cent leaves a wide margin.
@@ -244,7 +248,7 @@ def check_freshness(cited: list[str], headline_meta: dict[str, str], max_hours: 
     """
     stale_urls = []
     unknown_date_urls = []
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     normalized_meta = {normalize_url(url): pub_date for url, pub_date in headline_meta.items()}
     for url in cited:
         pub_date_str = normalized_meta.get(normalize_url(url))
@@ -254,7 +258,7 @@ def check_freshness(cited: list[str], headline_meta: dict[str, str], max_hours: 
         try:
             pub_date = email.utils.parsedate_to_datetime(pub_date_str)
             if pub_date.tzinfo is None:
-                pub_date = pub_date.replace(tzinfo=timezone.utc)
+                pub_date = pub_date.replace(tzinfo=UTC)
             if (now - pub_date).total_seconds() / 3600.0 > max_hours:
                 stale_urls.append(url)
         except (TypeError, ValueError):
@@ -491,7 +495,8 @@ def run_evals(
     cited: list[str] = []
     uncited_items, unverified_quotes, ungrounded = [], [], []
     for item in items:
-        source = normalize_url(item.source_url.strip()) if item.source_url.strip().startswith("http") else ""
+        # Schemes are case-insensitive, so HTTPS:// is a link too
+        source = normalize_url(item.source_url.strip()) if item.source_url.strip().lower().startswith("http") else ""
         if not source:
             uncited_items.append(item.claim)
             continue
@@ -521,6 +526,9 @@ def run_evals(
     # A warning: a note that names no failure, such as which feeds a story came from, isn't a fetch
     # problem, and it can carry story names past check_fetch_notes by mentioning a feed
     notes_without_failure = [note for note in briefing.fetch_notes if not FAILURE_WORDS.search(note)] if briefing else []
+    # A warning: one item from five fetched articles has dropped most of the reading. It isn't a
+    # failure, because what the briefing does say is still checked.
+    too_few_items = briefing is not None and len(items) < min(MIN_ITEMS, len(articles))
 
     # A briefing with nothing verified has proved nothing. Stale and undated stories are warnings:
     # feeds keep important stories for days, so failing on age would fail correct briefings.
@@ -547,6 +555,7 @@ def run_evals(
         "ungrounded": ungrounded,
         "india_off_topic": india_off_topic,
         "repeated_items": repeated_items,
+        "too_few_items": too_few_items,
         "stale": stale,
         "unknown_date": unknown_date,
         "suspected_injections": list(suspected_injections),
@@ -571,6 +580,7 @@ def run_evals(
     print(f"Items naming things their article doesn't (warning): {len(ungrounded)}")
     print(f"India items that don't mention India (warning): {len(india_off_topic)}")
     print(f"Repeated items (warning): {len(repeated_items)}")
+    print(f"Fewer than {MIN_ITEMS} items, or than the articles fetched (warning): {'yes' if too_few_items else 'no'}")
     print(f"Stale news warnings (>72h): {len(stale)}")
     print(f"Unknown publish date warnings: {len(unknown_date)}")
     print(f"Suspected prompt injections: {len(suspected_injections)}")

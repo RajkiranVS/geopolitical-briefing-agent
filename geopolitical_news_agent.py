@@ -13,7 +13,7 @@ import threading
 import zlib
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
@@ -68,6 +68,8 @@ PAGE_LINE = re.compile(
     r"^(?:- Published|\(With inputs from [^)\n]*\)|Additional reporting by [^\n]*|Images? Courtesy:[^\n]*)[ \t]*$",
     re.MULTILINE | re.IGNORECASE,
 )
+# Whitespace or a control character, which a real link never contains
+UNSAFE_LINK = re.compile(r"[\s\x00-\x1f\x7f]")
 # India TV's "Also read:" line and the line after it, which is usually another story's headline.
 # looks_like_headline decides whether that line goes too.
 ALSO_READ_BLOCK = re.compile(r"^Also read:?[ \t]*\n([^\n]*)$", re.MULTILINE | re.IGNORECASE)
@@ -258,7 +260,7 @@ def feed_date(entry) -> str | None:
     """
     parsed = entry.get("published_parsed") or entry.get("updated_parsed")
     if parsed:
-        return email.utils.format_datetime(datetime(*parsed[:6], tzinfo=timezone.utc))
+        return email.utils.format_datetime(datetime(*parsed[:6], tzinfo=UTC))
     return entry.get("published") or entry.get("updated")
 
 def download_feed(feed_url: str):
@@ -393,6 +395,15 @@ def make_tools(run: RunState) -> list:
             title = clean_feed_text(entry.get('title', 'No title'))
             summary = clean_feed_text(entry.get('summary', 'No summary'))
             link = entry.get('link')
+            # The link is the one field the model sees as the feed sent it, so it must be a plain link
+            # on the allowlist. Spaces or control characters could imitate more fields of the item, and
+            # an off-list link can't be fetched or cited anyway, so either way the item is skipped.
+            if link and UNSAFE_LINK.search(link):
+                run.suspected_injections.append(f"{feed_url}: an item's link contains spaces or control characters")
+                continue
+            if link and not is_allowed_domain(link, DEFAULT_ALLOWED_DOMAINS):
+                logger.warning("Skipped an item from %s whose link is off the allowlist: %s", feed_url, link)
+                continue
 
             # Check exactly what the model would read
             signs = find_injection_signs(f"{title}\n{summary}")
@@ -715,7 +726,7 @@ def main(argv: Sequence[str] = ()):
     args = parser.parse_args(list(argv))
 
     run = RunState()
-    started = datetime.now(timezone.utc)
+    started = datetime.now(UTC)
     try:
         messages = build_agent(run).invoke([HumanMessage(content=args.request)])
     except Exception as error:  # noqa: BLE001
