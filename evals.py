@@ -49,6 +49,11 @@ FETCH_PROBLEM_WORDS = re.compile(
     r'summari[sz]\w*|items?|loaded|retrieved|retry|retried|withheld|none)\b',
     re.IGNORECASE,
 )
+# A quote in double quotes, straight or curly, on one line.
+QUOTE_PATTERN = re.compile(r'"([^"\n]{3,500})"|“([^”\n]{3,500})”')
+# Punctuation at either end of a quote, such as a full stop placed inside the quotation marks.
+QUOTE_EDGE_PUNCTUATION = " .,;:!?'"
+ELLIPSIS = re.compile(r'\[(?:\.\.\.|…)\]|\.\.\.|…')
 # A notes line that only says nothing went wrong, as in "No issues." It must be the whole line,
 # so a claim such as "Iran faced no problems at the border" isn't accepted.
 NO_PROBLEMS_LINE = re.compile(r'no\s+(issues?|problems?|errors?)(\s+(to\s+report|found|encountered))?', re.IGNORECASE)
@@ -224,17 +229,17 @@ def strip_fetch_notes(briefing: str) -> str:
         return briefing
     return briefing[:last_marker.start()]
 
-def check_uncited_items(briefing: str) -> list[str]:
-    """Flags list items and prose paragraphs that have no URL citation and aren't a placeholder.
+def split_items(briefing: str) -> list[str]:
+    """Splits the briefing into list items and prose paragraphs, each joined onto one line.
 
     Items are grouped across line continuations. Headings, bold titles and horizontal rules
-    need no citation. A final FETCH_NOTES_MARKER section is ignored (see strip_fetch_notes).
+    aren't items. A final FETCH_NOTES_MARKER section is left out (see strip_fetch_notes).
 
     Args:
-        briefing: The text briefing content to validate.
+        briefing: The text briefing content.
 
     Returns:
-        A list of joined item strings that lack citations.
+        The items and paragraphs, in order.
     """
     items = []
     current_item = []
@@ -285,8 +290,17 @@ def check_uncited_items(briefing: str) -> list[str]:
 
     # Save the final residual item block if one remains open
     save_current()
+    return items
 
-    # Evaluation and screening criteria
+def check_uncited_items(briefing: str) -> list[str]:
+    """Flags list items and prose paragraphs that have no URL citation and aren't a placeholder.
+
+    Args:
+        briefing: The text briefing content to validate.
+
+    Returns:
+        A list of joined item strings that lack citations.
+    """
     flagged_items = []
 
     # Standard placeholder variants
@@ -299,7 +313,7 @@ def check_uncited_items(briefing: str) -> list[str]:
         "no significant developments"
     }
 
-    for item in items:
+    for item in split_items(briefing):
         # Check if the combined item context contains a valid URL
         if not re.search(URL_PATTERN, item):
             # The whole item, minus its bullet and Markdown wrappers, must be an allowed phrase
@@ -310,6 +324,70 @@ def check_uncited_items(briefing: str) -> list[str]:
                 flagged_items.append(item)
 
     return flagged_items
+
+def normalize_quote_text(text: str) -> str:
+    """Makes text comparable for the quote check.
+
+    Curly quotes and apostrophes become straight, dashes become hyphens, whitespace collapses
+    and case is ignored, because these change between the article and the briefing without
+    changing the words.
+
+    Args:
+        text: An article or a quote.
+
+    Returns:
+        The normalized text.
+    """
+    for old, new in (("‘", "'"), ("’", "'"), ("“", '"'), ("”", '"'), ("–", "-"), ("—", "-")):
+        text = text.replace(old, new)
+    return " ".join(text.split()).lower()
+
+def check_quotes(briefing: str, fetched: dict[str, str]) -> list[str]:
+    """Flags quotes that don't appear word for word in an article their item cites.
+
+    Only quotes of two or more words are checked, because single quoted words are usually
+    labels or scare quotes. An ellipsis inside a quote may stand for left-out text. Items that
+    cite no fetched article are skipped, because the citation checks already fail them.
+
+    Args:
+        briefing: The text briefing content.
+        fetched: Dict of {url: article_text} for the articles the model read.
+
+    Returns:
+        The quotes that weren't found, each with the start of its item.
+    """
+    articles = {normalize_url(url): normalize_quote_text(text) for url, text in fetched.items()}
+    unverified = []
+    for item in split_items(briefing):
+        cited = [articles[url] for url in extract_citations(item) if url in articles]
+        if not cited:
+            continue
+        for match in QUOTE_PATTERN.finditer(item):
+            quote = (match.group(1) or match.group(2)).strip(QUOTE_EDGE_PUNCTUATION)
+            if len(quote.split()) < 2:
+                continue
+            parts = [normalize_quote_text(part).strip(QUOTE_EDGE_PUNCTUATION) for part in ELLIPSIS.split(quote)]
+            if not any(appears_in_order([part for part in parts if part], article) for article in cited):
+                unverified.append(f'"{quote}" in: {item[:80]}')
+    return unverified
+
+def appears_in_order(parts: list[str], article: str) -> bool:
+    """Checks that each part of a quote appears in the article, in order.
+
+    Args:
+        parts: The normalized pieces of a quote, split at any ellipsis.
+        article: The normalized article text.
+
+    Returns:
+        True if every part is found after the one before it.
+    """
+    position = 0
+    for part in parts:
+        found = article.find(part, position)
+        if found == -1:
+            return False
+        position = found + len(part)
+    return True
 
 def check_freshness(cited: list[str], headline_meta: dict[str, str], max_hours: int = 72, now: datetime | None = None) -> tuple[list[str], list[str]]:
     """Flags citations older than max_hours, using timezone-aware datetimes.
@@ -444,16 +522,18 @@ def run_evals(briefing: str, fetched: dict[str, str], headline_meta: dict[str, s
     cited_urls = extract_citations(briefing)
     verified, unverified = check_cited_were_fetched(cited_urls, fetched)
     uncited_items = check_uncited_items(briefing)
+    unverified_quotes = check_quotes(briefing, fetched)
     stale, unknown_date = check_freshness(cited_urls, headline_meta, now=now)
     off_list = check_allowed_sources(cited_urls, allowed_domains)
-    
+
     # Strict validation rule: a briefing with nothing verified has proved nothing
-    passed = len(verified) > 0 and not unverified and not uncited_items
-    
+    passed = len(verified) > 0 and not unverified and not uncited_items and not unverified_quotes
+
     report = {
         "verified_count": len(verified),
         "unverified": unverified,
         "uncited_items": uncited_items,
+        "unverified_quotes": unverified_quotes,
         "stale": stale,
         "unknown_date": unknown_date,
         "off_list": off_list,
@@ -472,6 +552,7 @@ def run_evals(briefing: str, fetched: dict[str, str], headline_meta: dict[str, s
     print(f"Verified Citations: {len(verified)}")
     print(f"Cited but not read: {len(unverified)}")
     print(f"Uncited items and paragraphs: {len(uncited_items)}")
+    print(f"Quotes not found in the cited article: {len(unverified_quotes)}")
     print(f"Stale news warnings (>72h): {len(stale)}")
     print(f"Unknown publish date warnings: {len(unknown_date)}")
     print(f"Out of Bounds Domains: {len(off_list)}")

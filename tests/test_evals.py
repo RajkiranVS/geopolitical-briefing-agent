@@ -9,6 +9,7 @@ from evals import (
     EMPTY_SECTION_PLACEHOLDER,
     check_cited_were_fetched,
     check_freshness,
+    check_quotes,
     check_uncited_items,
     extract_citations,
     find_injection_signs,
@@ -587,6 +588,53 @@ def test_all_empty_sections_fails():
     report = run_evals(briefing, {}, {}, report_path=None, now=NOW)
     assert report["uncited_items"] == []
     assert report["passed"] is False
+
+
+# check_quotes
+
+QUOTE_URL = "https://www.bbc.com/news/world-123"
+QUOTE_ARTICLE = {QUOTE_URL: "The minister said the talks were “frank and constructive” and that trade would resume — after a review of tariffs."}
+
+def test_exact_quote_passes():
+    """Checks that a quote found word for word in the cited article passes."""
+    briefing = f'- The minister called the talks "frank and constructive". Source: {QUOTE_URL}'
+    assert check_quotes(briefing, QUOTE_ARTICLE) == []
+
+def test_quote_with_different_quote_marks_dashes_and_punctuation_passes():
+    """Checks that curly quotes, dashes, case and a full stop inside the quote don't count as changes."""
+    # Regression: a real briefing quoted "unauthorised routes." with the full stop inside the quotation marks.
+    briefing = f'- The minister said trade “Would Resume - after a review of tariffs.” Source: {QUOTE_URL}'
+    assert check_quotes(briefing, QUOTE_ARTICLE) == []
+
+def test_quote_with_ellipsis_passes_when_parts_appear_in_order():
+    """Checks that an ellipsis may stand for left-out text, but the parts must keep their order."""
+    passing = f'- He said "the talks were ... and that trade would resume". Source: {QUOTE_URL}'
+    reordered = f'- He said "trade would resume ... the talks were". Source: {QUOTE_URL}'
+    assert check_quotes(passing, QUOTE_ARTICLE) == []
+    assert len(check_quotes(reordered, QUOTE_ARTICLE)) == 1
+
+def test_changed_quote_fails_the_eval():
+    """Checks that a quote whose wording changed fails the briefing."""
+    briefing = f'- The minister called the talks "frank and productive". Source: {QUOTE_URL}'
+    report = run_evals(briefing, QUOTE_ARTICLE, {QUOTE_URL: rfc2822(NOW - timedelta(hours=2))}, report_path=None, now=NOW)
+    assert report["unverified_quotes"] == [f'"frank and productive" in: {briefing[:80]}']
+    assert report["verified_count"] == 1
+    assert report["passed"] is False
+
+def test_quote_must_come_from_the_article_its_item_cites():
+    """Checks that a quote found only in a different article than the one cited fails."""
+    other = "https://www.thehindu.com/news/article1.ece"
+    articles = {**QUOTE_ARTICLE, other: "Officials described the visit as routine."}
+    briefing = f'- Officials called the talks "frank and constructive". Source: {other}'
+    assert len(check_quotes(briefing, articles)) == 1
+
+def test_single_words_and_uncited_items_are_not_quote_checked():
+    """Checks that single quoted words and items citing no fetched article are skipped."""
+    briefing = (
+        f'- The so-called "reset" was discussed. Source: {QUOTE_URL}\n'
+        '- He said "something nobody wrote down". Source: https://www.bbc.com/news/not-fetched\n'
+    )
+    assert check_quotes(briefing, QUOTE_ARTICLE) == []
 
 def test_unverified_citation_fails_alongside_verified_one():
     """Checks that one unverified citation fails a briefing with a verified one."""

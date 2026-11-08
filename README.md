@@ -55,7 +55,8 @@ geopolitical-briefing-agent/
 ├── evals.py                     # Runtime evaluation checks for the briefing output
 ├── pytest.ini                   # pytest config (adds project root to path, sets test dir)
 ├── ruff.toml                    # Lint rules, including Google style docstrings
-├── requirements.txt             # Python dependencies
+├── requirements.txt             # Runtime dependencies, with version ranges
+├── requirements-dev.txt         # Adds pytest and the pinned ruff for tests and linting
 ├── .env.example                 # Template for the required credentials
 ├── .gitignore
 ├── LICENSE                      # MIT
@@ -140,6 +141,7 @@ The system prompt asks for this format:
 | `check_cited_were_fetched(cited, fetched)` | Detects **hallucinated citations**, meaning URLs that were cited but never fetched. | `(verified, unverified)` |
 | `is_allowed_domain(url, allowed_domains)` | Shared allowlist rule used by the tools and the eval: `http`/`https` only, a real hostname, and host equal to an allowed domain or a subdomain of it (so `evilbbc.com` is refused). URLs that are malformed or contain a username, backslash, whitespace or control character are refused too, because HTTP clients can read their host differently (`https://evil.example\@bbc.com` connects to `evil.example`). | `bool` |
 | `check_uncited_items(briefing)` | Ignores a final `FETCH NOTES:` section, groups bullet and numbered items and prose paragraphs with their continuation lines, and flags any item or paragraph without a URL. Headings, bold titles and horizontal rules need no citation. The notes are only ignored if the marker starts its own line (in any case) and every line after it names a source or a step of the run (words such as "feed", "article", "fetched", "loaded" or "instructions"), says "none", or is a whole line such as "No issues." or "No problems found." Otherwise the whole briefing is checked. An item is accepted as an empty-section placeholder only if the whole item is an allowed phrase. | List of flagged items |
+| `check_quotes(briefing, fetched)` | Checks that every quote of two or more words, in straight or curly double quotes, appears word for word in an article cited by the same item. Curly and straight quotes, dashes, case, whitespace and punctuation at the ends of a quote are ignored, and an ellipsis may stand for left-out text if the parts keep their order. Single quoted words, and items that cite no fetched article, are skipped. | List of quotes not found |
 | `check_freshness(cited, headline_meta, max_hours=72, now=None)` | Flags stories older than `max_hours`, using RFC 2822 feed dates. | `(stale, unknown_date)` |
 | `check_allowed_sources(cited, allowed_domains)` | Flags citations whose domain, or parent domain, is not on the allow-list. | List of off-list URLs |
 | `check_grounding(item, article_text)` | A lightweight hallucination heuristic: numbers and capitalised words in an item must appear in the source article. | List of missing entities |
@@ -150,8 +152,9 @@ The system prompt asks for this format:
 A briefing **passes** only if all of these are true:
 
 - at least one citation was verified (`verified_count` is above 0), so an empty, prose-only or refused briefing fails,
-- every cited URL was actually fetched (`unverified` is empty), **and**
-- every bullet item and prose paragraph carries a citation (`uncited_items` is empty).
+- every cited URL was actually fetched (`unverified` is empty),
+- every bullet item and prose paragraph carries a citation (`uncited_items` is empty), **and**
+- every quote appears word for word in an article its item cites (`unverified_quotes` is empty).
 
 Stale stories, unknown dates and off-list domains are reported as **warnings**. They do not make the briefing fail.
 
@@ -164,6 +167,7 @@ When the eval fails, the agent script exits with code 1.
     "verified_count": 4,
     "unverified": [],
     "uncited_items": [],
+    "unverified_quotes": [],
     "stale": [],
     "unknown_date": [],
     "off_list": [],
@@ -194,9 +198,11 @@ source .venv/bin/activate
 
 # Install dependencies
 pip install -r requirements.txt
+# Or, to also run the tests and lint
+pip install -r requirements-dev.txt
 ```
 
-> **Tip:** `requirements.txt` is unpinned. To freeze exact versions for reproducible installs, run `pip freeze > requirements.txt`.
+> **Tip:** `requirements.txt` gives each package a minimum, the version the tests were run with, and stops before the next major version. To freeze exact versions for reproducible installs, run `pip freeze > requirements-lock.txt`.
 
 ### Configuration
 
@@ -292,7 +298,7 @@ pytest -k fresh   # run only the freshness tests
 ruff check .     # lint, including docstring style
 ```
 
-CI fails if `ruff` reports anything. It pins `ruff` to 0.17.3, because the docstring rules in [`ruff.toml`](ruff.toml) are preview rules that can change between releases. Use the same version locally (`pip install ruff==0.17.3`) to get the same results.
+CI fails if `ruff` reports anything. It pins `ruff` to 0.17.3, because the docstring rules in [`ruff.toml`](ruff.toml) are preview rules that can change between releases. `requirements-dev.txt` installs the same version locally, so you get the same results.
 
 Every module, class and function has a Google style docstring, with `Args`, `Returns` and `Raises` sections where they apply. Two checks work together, because neither covers everything:
 
@@ -310,9 +316,11 @@ The docstrings of `get_headlines` and `fetch_article` are also the tool descript
 | Job | What it does | Fails the build when |
 |-----|--------------|----------------------|
 | `tests` (push to `main`, PRs, manual) | Byte-compiles every module, runs `ruff` and runs `pytest` on Python 3.10 and 3.12. | Compilation fails, `ruff` reports a problem, or any test fails |
-| `claude-evaluation` (PRs and manual only) | Runs Claude Code in headless mode (`claude -p`) with the prompt in [`.github/claude/review-prompt.md`](.github/claude/review-prompt.md). Claude reads the whole repo, runs pytest, compileall, ruff and pip-audit, and can write throwaway probe tests to confirm suspected bugs. It then scores nine dimensions: correctness, agent design, security, eval quality, tests, code quality, dependencies, docs accuracy and CI. Never: the verdict is reported as a warning, because an LLM's verdict can vary between runs on the same code |
+| `claude-evaluation` (PRs and manual only) | Runs Claude Code in headless mode (`claude -p`) with the prompt in [`.github/claude/review-prompt.md`](.github/claude/review-prompt.md). An earlier step runs pytest, compileall, ruff and pip-audit without the API key and saves their output. Claude reads the whole repo and that output, and can write throwaway probe tests to confirm suspected bugs. It then scores nine dimensions: correctness, agent design, security, eval quality, tests, code quality, dependencies, docs accuracy and CI. Never: the verdict is reported as a warning, because an LLM's verdict can vary between runs on the same code |
 
-Claude can use these tools: `Read`, `Glob`, `Grep`, `Write` and `TodoWrite`, plus a Bash allow-list for pytest, compileall, ruff, pip-audit, pip, read-only git commands, `ls` and `wc`. `Edit` and web access are blocked. Claude is told not to run the agent script, because that would make live API and network calls.
+Claude can use `Read`, `Glob`, `Grep` and `TodoWrite`, can write files only inside `claude-review/`, and has a Bash allow-list for running its probe tests, `pip list` and `pip show`, read-only git commands, `ls` and `wc`. Web access is blocked. Claude is told not to run the agent script, because that would make live API and network calls.
+
+The project's tests never run in the step that has the API key. Probe tests do, because Claude writes them during its run, but only through `env -u ANTHROPIC_API_KEY`, which keeps the key out of their environment. That stops accidental exposure, such as a test that prints its environment, not a test written to steal the key, which could still read it from the parent process. The job only runs for branches in this repository, so writing such a test needs write access. The Claude Code CLI and every action are pinned, the actions to a commit.
 
 The report goes to the job summary and is posted as a comment on PRs (the comment is updated on each run). It is also uploaded as the `claude-evaluation` artifact, with `report.md`, `verdict.json` and the raw CLI output, which includes turn count and cost.
 
@@ -434,11 +442,12 @@ The first live runs failed, and each failure was a real finding. Every fix lande
 
 ## Known Limitations
 
-- **Citations are checked for provenance, not accuracy.** The evals prove that every cited URL points to an article the agent actually fetched. They do not prove that the claim next to the citation is supported by that article. A bullet can cite a real, fetched article and still misstate what it says, and no check in `run_evals` would catch it.
+- **Citations are checked for provenance, not accuracy.** The evals prove that every cited URL points to an article the agent actually fetched. They do not prove that the claim next to the citation is supported by that article. A bullet can cite a real, fetched article and still misstate what it says. Only quotes are checked against the article: `check_quotes` fails a quote that was changed or made up, but a paraphrase can say anything.
 - **Headings need no citation.** Prose paragraphs must cite a URL, like bullets, but a claim written as a heading, a bold title, a short line in capitals, a line of up to 120 characters ending in a colon, or an intro sentence starting "Here is" with no numbers (`## Iran seized a tanker`) still passes. A paragraph that holds only `Source:` and one link counts as the citation of the item before it. A closing line after the `FETCH NOTES:` section, such as "Let me know if you want more detail", makes the notes check fail, because the prompt says the notes must come last.
 - **The `FETCH NOTES:` check is a word list.** Every line of the notes must name a source or a step of the run, so a plain news claim there fails the briefing. A claim that also names its source, such as "The BBC article says the talks collapsed", still passes. In the other direction, a real fetch problem worded without any of the listed words makes the briefing fail, which errs on the safe side. Replayed on 98 saved real briefings (8 live runs and 90 attack suite runs), this check and the prose check changed no result.
 - **India-focused.** The prompt and the Google News feed are set up for India; briefings for other countries would need the prompt and feed query changed.
-- **The 5-article cap has a race.** Tool calls from a single model turn run in parallel, so if the model requests six fetches at once, all six can pass the `len(fetched) >= 5` check before any is recorded. A lock around check-and-reserve would close it.
+- **Failed fetches aren't limited.** The 5-article cap counts only successful downloads, and a lock stops parallel calls from passing it. A failed download frees its place, so a model, or text it read, can keep asking for links that fail until the 15-round limit. Each request still has to be a feed link on an allowed host.
+- **The quote check rests on little data.** In 8 live runs on 8 November 2026 the model quoted only 3 times, and all 3 passed once punctuation inside the quotation marks was ignored. Quotes are compared with the text the model read, which is the article cut to 4,000 characters, so a real quote from later in the article fails.
 - **`check_grounding` is a heuristic.** It matches surface tokens (numbers and capitalised words), so paraphrases or differences in number formatting can produce false positives. It is also not called by `run_evals`.
 - **Prompt injection can be reduced, not eliminated.** The tool restrictions hold even if the model is fooled, but only the model's judgement stops a false claim from reaching the briefing. A planted "correction" in a real article can't be told apart from a genuine one. The text screen is easy to reword around, and it also flags ordinary news that uses similar wording, so a `suspected_injections` entry is a prompt to look, not proof of an attack. If the API refuses because of fetched content, the run reports that and exits 1 with no briefing.
 - **Redirects are checked after they happen.** The tools discard content from a redirect off the allowlist, but the request to that host has already been made. `trafilatura` blocks private addresses before connecting, for both tools.
@@ -446,16 +455,14 @@ The first live runs failed, and each failure was a real finding. Every fix lande
 - **The download timeout isn't a total limit.** It applies to each read, so a stalled server fails after about 2 minutes, but one that keeps sending a little at a time isn't cut off until the body reaches trafilatura's size limit. The tools only download from allowlisted hosts, which limits who could do this.
 - **Google News sometimes sends a cut-off feed with status 200.** The cause isn't known. `get_headlines` downloads a feed again if it can't be parsed. Articles have no such retry: in one test on 6 November 2026, none of 384 parallel downloads from BBC and The Hindu came back cut off, but that test didn't cover Google News article links.
 - **Freshness depends on feed metadata.** Stories without a parseable `Published` date are reported as `unknown_date`, not as stale.
-- **Dependencies are not pinned.** `requirements.txt` lists package names only.
+- **Dependencies have ranges, not exact pins.** A new minor release inside a range can still change behaviour between installs. There is no lock file.
+- **CI still tests Python 3.10**, which reached end of life in October 2026, because it is the oldest version the code supports.
 
 ---
 
 ## Roadmap
 
-- **Verbatim quote check.** Add a deterministic check to `evals.py` that finds every quoted string in the briefing (text between `"…"` or `“…”`) and confirms it appears word for word in the fetched text of the article cited by the same bullet. This is plain Python with no LLM call, so it is cheap to run on every briefing. It catches invented or altered quotes, which is the most damaging form of the provenance-vs-accuracy gap described in [Known Limitations](#known-limitations). It already has a real target: the quote from Bedi's speech has changed wording between runs, so at least one version cannot be verbatim. Implementation notes:
-  - Normalise both sides before comparing: curly to straight quotes, collapsed whitespace, unified dashes and apostrophes.
-  - Compare against the full fetched text, not only the 4,000-character excerpt sent to the model, and report which case applied.
-  - Treat a quote that is missing from its cited article as a **failure**, not a warning, and add it to the report as `unverified_quotes`.
+- **Per-item grounding.** `check_quotes` covers quotes only. The next step toward checking accuracy is to run a grounding check on each item against the article it cites, as a warning first, and measure how often it fires on correct briefings before it can fail a run. `check_grounding` is a starting point, but it matches surface tokens and needs case-insensitive matching and number normalisation first.
 
 ---
 
