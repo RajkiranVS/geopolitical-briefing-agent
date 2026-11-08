@@ -626,6 +626,11 @@ def test_notes_that_name_a_failure_pass():
         "The BBC article returned FETCH_FAILED.",
         "The Times of India feed was unable to load.",
         "The Hindu article page was empty.",
+        # Found in review: ordinary wordings, the first being get_headlines' own failure message
+        "The India TV feed had no usable items.",
+        "BBC feed returned no headlines.",
+        "The Times of India article was paywalled.",
+        "The Hindu article page was blank.",
         "none",
     ]
     report = evaluate(make_briefing([("Leaders met.", URL)], fetch_notes=notes))
@@ -634,6 +639,12 @@ def test_notes_that_name_a_failure_pass():
 def test_notes_saying_everything_worked_are_reported():
     """Checks that notes that only say things went well are reported, since the notes are for failures."""
     note = "The Hindu feed and BBC feed headlines were read without problems; five articles were fetched and used."
+    assert evaluate(make_briefing([("Leaders met.", URL)], fetch_notes=[note]))["notes_without_failure"] == [note]
+
+def test_no_articles_fetched_from_a_feed_is_not_a_failure():
+    """Checks that a note saying a feed was only used for headlines isn't taken for a failure."""
+    # From a live run: "no articles" here describes a choice, not something that went wrong.
+    note = "The Hindu international feed and BBC world feed were read successfully; India TV was read for headlines only and no articles from it were fetched."
     assert evaluate(make_briefing([("Leaders met.", URL)], fetch_notes=[note]))["notes_without_failure"] == [note]
 
 def test_a_number_alone_is_not_a_failure_status():
