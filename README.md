@@ -102,7 +102,7 @@ The agent is built with the LangGraph **Functional API** (`@entrypoint` and `@ta
 
 1. **`call_llm`**: sends the system prompt and message history to the model (`claude-haiku-5-5` unless `BRIEFING_MODEL` says otherwise), with `get_headlines`, `fetch_article` and `SubmitBriefing` bound to it.
 2. **`call_tool`**: runs each tool call the model requested.
-3. **`agent`** (entrypoint): repeats steps 1 and 2 until the model calls `SubmitBriefing`. If the model answers in text instead, or reaches 15 rounds, it is asked once more with `SubmitBriefing` forced. The other tools stay defined on that call, because the message history contains calls to them.
+3. **`agent`** (entrypoint): repeats steps 1 and 2 until the model calls `SubmitBriefing`. If the model answers in text instead, or reaches 15 rounds, it is asked once more with `SubmitBriefing` forced. If its `SubmitBriefing` call doesn't fit the schema, the validation errors go back to it as that call's result, and it gets one more forced call. The other tools stay defined on that call, because the message history contains calls to them.
 4. **`main()`** creates a `RunState`, runs the agent on the request, renders the submitted briefing as Markdown and calls **`run_evals()`** on it, with the `fetched` and `headline_meta` dictionaries the run's tools filled.
 
 ### Tools

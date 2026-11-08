@@ -1077,6 +1077,61 @@ def test_briefing_that_does_not_fit_the_schema_is_rejected(agent_module):
     assert agent_module.find_briefing([]) is None
 
 
+def malformed_briefing(other_calls=()):
+    """Builds a model response whose SubmitBriefing call doesn't fit the schema.
+
+    Args:
+        other_calls: Tool calls made in the same response.
+
+    Returns:
+        An AIMessage with a SubmitBriefing call whose india field isn't a list.
+    """
+    call = {"name": "SubmitBriefing", "args": {"key_developments": [], "india": "none", "fetch_notes": []}, "id": "call_bad", "type": "tool_call"}
+    return AIMessage(content="", tool_calls=[*other_calls, call])
+
+
+def test_malformed_briefing_gets_one_retry_with_the_errors(agent_module):
+    """Checks that a briefing that doesn't fit the schema is sent back with its errors, and resubmitted.
+
+    Args:
+        agent_module: The agent module.
+    """
+    # Regression: found in review. One malformed submission lost the whole briefing after all the fetching.
+    final_model = ScriptedModel([briefing_message([("Leaders met.", ARTICLE_URL)])])
+    agent = scripted_agent(agent_module, ScriptedModel([malformed_briefing()]), final_model)
+    messages = agent.invoke([HumanMessage(content="Brief me")])
+    assert agent_module.find_briefing(messages).key_developments[0].claim == "Leaders met."
+    error = final_model.calls[0][-1]
+    assert error.tool_call_id == "call_bad"
+    assert "india" in error.content and "Call SubmitBriefing again" in error.content
+
+
+def test_malformed_briefing_is_retried_only_once(agent_module):
+    """Checks that a model that keeps submitting a malformed briefing doesn't loop.
+
+    Args:
+        agent_module: The agent module.
+    """
+    final_model = ScriptedModel([malformed_briefing()])
+    messages = scripted_agent(agent_module, ScriptedModel([malformed_briefing()]), final_model).invoke([HumanMessage(content="Brief me")])
+    assert len(final_model.calls) == 1
+    assert agent_module.find_briefing(messages) is None
+
+
+def test_calls_made_alongside_a_malformed_briefing_are_answered(agent_module):
+    """Checks that every other call in the same response gets a result, as the API requires.
+
+    Args:
+        agent_module: The agent module.
+    """
+    final_model = ScriptedModel([briefing_message([("Leaders met.", ARTICLE_URL)])])
+    agent = scripted_agent(agent_module, ScriptedModel([malformed_briefing(other_calls=[FEED_CALL])]), final_model)
+    agent.invoke([HumanMessage(content="Brief me")])
+    results = {message.tool_call_id: message.content for message in final_model.calls[0][-2:]}
+    assert set(results) == {"call_1", "call_bad"}
+    assert results["call_1"].startswith("Not run")
+
+
 def test_main_reports_an_agent_crash_and_exits_1(agent_module, monkeypatch, tmp_path, capsys):
     """Checks that an agent crash prints the error, writes a report and exits 1.
 

@@ -420,6 +420,23 @@ def briefing_call(message: BaseMessage) -> ToolCall | None:
     calls = getattr(message, "tool_calls", None) or []
     return next((call for call in calls if call["name"] == BRIEFING_TOOL), None)
 
+def briefing_error(call: ToolCall) -> str | None:
+    """Checks a SubmitBriefing call against the schema.
+
+    Args:
+        call: The SubmitBriefing tool call.
+
+    Returns:
+        A short description of what doesn't fit, such as "india: Input should be a valid list.",
+        or None if the briefing is valid.
+    """
+    try:
+        SubmitBriefing.model_validate(call["args"])
+    except ValidationError as error:
+        problems = [f"{'.'.join(str(part) for part in issue['loc']) or 'briefing'}: {issue['msg']}." for issue in error.errors()]
+        return " ".join(problems[:5])
+    return None
+
 def find_briefing(messages: Sequence[BaseMessage]) -> SubmitBriefing | None:
     """Reads the submitted briefing from the end of a run.
 
@@ -528,6 +545,20 @@ def build_agent(run: RunState, models: tuple | None = None):
             tool_results = [fut.result() for fut in tool_result_futures]
             messages = cast(list[BaseMessage], add_messages(list(messages), [model_response, *tool_results]))
             model_response = call_llm(messages).result()
+
+        # A briefing that doesn't fit the schema would lose all the reading done so far, so the
+        # model gets the errors and one more try. Only one, so a model that keeps failing can't loop.
+        call = briefing_call(model_response)
+        error = briefing_error(call) if call else None
+        if call and error:
+            # The API needs a result for every call in the response, including any made alongside it
+            retry_results = [
+                tool_error(tool_call, f"{BRIEFING_TOOL} didn't fit the schema: {error} Call {BRIEFING_TOOL} again with valid fields."
+                           if tool_call is call else "Not run: the briefing was submitted in the same turn.")
+                for tool_call in model_response.tool_calls
+            ]
+            messages = cast(list[BaseMessage], add_messages(list(messages), [model_response, *retry_results]))
+            model_response = call_llm(messages, must_submit=True).result()
         return cast(list[BaseMessage], add_messages(list(messages), model_response))
 
     return agent
