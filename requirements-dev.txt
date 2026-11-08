@@ -1,4 +1,6 @@
 # Tools for tests and linting, on top of the runtime requirements.
+# After changing this file or requirements.txt, regenerate the lock file that CI installs:
+#   uv pip compile requirements-dev.txt --universal --python-version 3.11 --generate-hashes --no-header -o requirements-lock.txt
 -r requirements.txt
 pytest>=9,<10
 # Pinned exactly: the ruff settings in pyproject.toml use preview docstring rules, which can change between releases.

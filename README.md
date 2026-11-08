@@ -76,6 +76,7 @@ geopolitical-briefing-agent/
 ├── pyproject.toml               # Package metadata, the geopolitical-briefing command, pytest and ruff settings
 ├── requirements.txt             # Runtime dependencies, with version ranges
 ├── requirements-dev.txt         # Adds pytest and the pinned ruff and pip-audit
+├── requirements-lock.txt        # Every package at an exact version, with hashes; what CI installs
 ├── .env.example                 # Template for the required credentials
 ├── .gitignore
 ├── LICENSE                      # MIT
@@ -127,7 +128,7 @@ The agent is built with the LangGraph **Functional API** (`@entrypoint` and `@ta
 
 | Tool | Purpose | Behaviour |
 |------|---------|-----------|
-| `get_headlines(feed_url)` | Discover stories | Refuses anything except the exact URLs in `ALLOWED_FEEDS` before fetching, downloads the feed with the same protected client as articles (30 seconds per read and up to 3 attempts, so about 2 minutes if the server stops responding), and discards a feed that redirected off the allowlist. Parses the RSS feed with `feedparser` and returns up to **15** numbered items (title, published date, link, summary). Records each `link → published` date in `headline_meta` (normalised URL as key) for the freshness check. A feed that doesn't parse cleanly is downloaded once more, and if that second download fails, the first parse is used when it had items. A body that is still gzip after download is decompressed, up to 5 MB, and each item's date is stored in RFC 2822 whatever form the feed uses. Returns `FETCH_FAILED: <url>` if the feed has no items. |
+| `get_headlines(feed_url)` | Discover stories | Refuses anything except the exact URLs in `ALLOWED_FEEDS` before fetching, downloads the feed with the same protected client as articles (30 seconds per read and up to 3 attempts, so about 2 minutes if the server stops responding), and discards a feed that redirected off the allowlist. Parses the RSS feed with `feedparser` and returns up to **15** numbered items (title, published date, link, summary). Records each `link → published` date in `headline_meta` (normalised URL as key) for the freshness check. A feed that doesn't parse cleanly is downloaded once more, and if that second download fails, the first parse is used when it had items. A body that is still gzip after download is decompressed, up to 5 MB, and each item's date is stored in RFC 2822 whatever form the feed uses. Skips an item whose link contains spaces or control characters, which could imitate more fields of the item, and records it as a suspected injection. Also skips an item whose link is off the allowlist, since it can't be fetched or cited. Returns `FETCH_FAILED: <url> had no usable items.` if no item is left. |
 | `fetch_article(url)` | Read a story | Refuses non-allowlisted URLs, then refuses once **5** articles have been fetched or **10** downloads have failed (`FETCH_LIMIT_REACHED`), and refuses a link already tried twice. It downloads the link exactly as the feed gave it, not the URL the model wrote, so the model can't add a query string that carries data to the site. Otherwise downloads the page with `trafilatura`, with certificate checks always on and its protection against private addresses. It discards a page that redirected off the allowlist, then extracts the article body and removes page text that isn't the story: The Hindu's `Published -` footer, India TV's "Also read" link to another story, agency, reporter and photo credits, and BBC's `- Published` line. It caps the result at **4,000 characters**, records exactly that text in `fetched` and returns it with `Source: <url>`. Failed fetches return `FETCH_FAILED: <url>` and don't count toward the limit. |
 
 ### News Sources
@@ -192,7 +193,7 @@ A briefing **passes** only if all of these are true:
 - every quote appears word for word in its item's source (`unverified_quotes` is empty), **and**
 - every fetch note describes the run (`notes_with_news` is empty).
 
-Stale stories, unknown dates, items that name things their article doesn't (`ungrounded`), India items that never mention India (`india_off_topic`), repeated items (`repeated_items`) and fetch notes that name no failure (`notes_without_failure`) are reported as **warnings**. Stale stories don't fail a briefing because feeds keep important stories for days, so failing on age would fail correct briefings.
+Stale stories, unknown dates, items that name things their article doesn't (`ungrounded`), India items that never mention India (`india_off_topic`), repeated items (`repeated_items`), fetch notes that name no failure (`notes_without_failure`) and a briefing with fewer than 3 items, or fewer items than articles fetched if that is less (`too_few_items`), are reported as **warnings**. Stale stories don't fail a briefing because feeds keep important stories for days, so failing on age would fail correct briefings.
 
 When the eval fails, the agent script exits with code 1.
 
@@ -217,6 +218,7 @@ Each run writes a new report to `eval_reports/eval_report_<UTC start time>.json`
     "ungrounded": [],
     "india_off_topic": [],
     "repeated_items": [],
+    "too_few_items": false,
     "notes_without_failure": [],
     "stale": [],
     "unknown_date": [],
@@ -231,7 +233,7 @@ Each run writes a new report to `eval_reports/eval_report_<UTC start time>.json`
 
 ### Prerequisites
 
-- **Python 3.10+**. The code uses `X | None` type syntax.
+- **Python 3.11+**. CI tests 3.11 and 3.13.
 - An **Anthropic API key**.
 - *(Optional)* A **LangSmith API key**, for tracing agent runs.
 
@@ -245,15 +247,17 @@ python -m venv .venv
 # macOS / Linux
 source .venv/bin/activate
 
-# Install dependencies
+# Install the exact versions CI tests, with their hashes checked, including the test and lint tools
+pip install --require-hashes -r requirements-lock.txt
+# Or the newest versions within the ranges in requirements.txt
 pip install -r requirements.txt
-# Or, to also run the tests and lint
+# Or, to also run the tests and lint, within the ranges
 pip install -r requirements-dev.txt
 # Or install the project itself, which adds the geopolitical-briefing command
 pip install -e .
 ```
 
-> **Tip:** `requirements.txt` gives each package a minimum, the version the tests were run with, and stops before the next major version. To freeze exact versions for reproducible installs, run `pip freeze > requirements-lock.txt`.
+> **Tip:** `requirements.txt` gives each package a minimum, the version the tests were run with, and stops before the next major version. `requirements-lock.txt` pins every package, including indirect ones, for Python 3.11 and later on any platform. After changing either requirements file, regenerate it with `uv pip compile requirements-dev.txt --universal --python-version 3.11 --generate-hashes --no-header -o requirements-lock.txt`.
 
 ### Configuration
 
@@ -370,7 +374,7 @@ The docstrings of `get_headlines` and `fetch_article`, and the field description
 
 | Job | What it does | Fails the build when |
 |-----|--------------|----------------------|
-| `tests` (push to `main`, every push to a PR, manual) | Byte-compiles every module, runs `ruff` and runs `pytest` on Python 3.10 and 3.12. | Compilation fails, `ruff` reports a problem, or any test fails |
+| `tests` (push to `main`, every push to a PR, manual) | Byte-compiles every module, runs `ruff` and runs `pytest` on Python 3.11 and 3.13, with the packages in `requirements-lock.txt`. | Compilation fails, `ruff` reports a problem, or any test fails |
 | `claude-evaluation` (when a PR opens, reopens or leaves draft, when the `claude-review` label is added, and manual runs) | Runs Claude Code in headless mode (`claude -p`) with the prompt in [`.github/claude/review-prompt.md`](.github/claude/review-prompt.md). An earlier step runs pytest, compileall, ruff and pip-audit without the API key and saves their output. Claude reads the whole repo and that output, and can write throwaway probe tests to confirm suspected bugs. It then scores nine dimensions: correctness, agent design, security, eval quality, tests, code quality, dependencies, docs accuracy and CI. | Never: the verdict is reported as a warning, because an LLM's verdict can vary between runs on the same code |
 
 Each review costs API credit, so it doesn't run on every push to a pull request. To review a pull request again after pushing more commits, remove the `claude-review` label and add it again. Draft pull requests aren't reviewed, so a PR can be opened as a draft while work continues and marked ready for one review at the end.
@@ -529,8 +533,7 @@ After that, each fix to the citation check exposed another way the model could w
 - **The download timeout isn't a total limit.** It applies to each read, so a stalled server fails after about 2 minutes, but one that keeps sending a little at a time isn't cut off until the body reaches trafilatura's size limit. The tools only download from allowlisted hosts, which limits who could do this.
 - **A feed can come back cut off with status 200.** This was seen with the Google News feed, which has since been dropped, and the cause isn't known. `get_headlines` still downloads a feed again if it can't be parsed. Articles have no such retry: in one test on 6 November 2026, none of 384 parallel downloads from BBC and The Hindu came back cut off.
 - **Freshness depends on feed metadata.** Stories without a parseable `Published` date are reported as `unknown_date`, not as stale.
-- **Dependencies have ranges, not exact pins.** A new minor release inside a range can still change behaviour between installs. There is no lock file.
-- **CI still tests Python 3.10**, which reached end of life in October 2026, because it is the oldest version the code supports.
+- **The lock file is updated by hand.** CI installs `requirements-lock.txt`, so a change to `requirements.txt` that isn't followed by regenerating the lock isn't tested. Installs from `requirements.txt` alone still get the newest versions in each range.
 
 ---
 

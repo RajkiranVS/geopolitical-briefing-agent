@@ -3,7 +3,7 @@
 import base64
 import email.utils
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -25,7 +25,7 @@ from evals import (
     run_evals,
 )
 
-NOW = datetime(2026, 11, 2, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 11, 2, 12, 0, tzinfo=UTC)
 GROUNDING_URL = "https://www.bbc.com/news/world-123"
 GROUNDING_ARTICLE = "Two oil tankers caught fire in the Gulf, the Revolutionary Guards said. Ministers met 5,000 delegates."
 
@@ -672,3 +672,27 @@ def test_a_number_alone_is_not_a_failure_status():
     # Regression: found in review. [45]\d\d on its own matched any number from 400 to 599.
     note = "The BBC feed gave a summary of 450 words on the Krakow story."
     assert evaluate(make_briefing([("Leaders met.", URL)], fetch_notes=[note]))["notes_without_failure"] == [note]
+
+
+# Item count and link case
+
+def test_one_item_from_several_articles_is_a_warning():
+    """Checks that a briefing with one item, when five articles were fetched, is warned about but passes."""
+    # Regression: found in review. One item passed with nothing said, though the schema asks for 3 to 5.
+    others = {f"https://www.bbc.co.uk/news/articles/other{number}": ARTICLE for number in range(4)}
+    report = evaluate(make_briefing([("Leaders met.", URL)]), fetched={URL: ARTICLE, **others})
+    assert report["too_few_items"] is True
+    assert report["passed"] is True
+
+
+def test_as_many_items_as_articles_is_not_too_few():
+    """Checks that fewer than 3 items is fine when fewer than 3 articles were fetched."""
+    assert evaluate(make_briefing([("Leaders met.", URL)]))["too_few_items"] is False
+
+
+def test_uppercase_scheme_is_a_citation():
+    """Checks that HTTPS:// in capitals counts as a link, not as an item without a source."""
+    # Regression: found in review. startswith("http") was case-sensitive.
+    report = evaluate(make_briefing([("Leaders met.", URL.replace("https://", "HTTPS://"))]))
+    assert report["uncited_items"] == []
+    assert report["passed"] is True

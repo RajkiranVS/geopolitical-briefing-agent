@@ -1,5 +1,6 @@
 [build-system]
-requires = ["setuptools>=69"]
+# 77 is the first version that accepts the license = "MIT" form below
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,8 +9,8 @@ version = "0.1.0"
 description = "A LangGraph agent that writes a cited geopolitical news briefing and evaluates it on every run."
 readme = "README.md"
 license = "MIT"
-# The oldest version CI tests
-requires-python = ">=3.10"
+# The oldest version CI tests. 3.10 reached end of life in October 2026.
+requires-python = ">=3.11"
 # requirements.txt stays the one list of runtime dependencies
 dynamic = ["dependencies"]
 
@@ -27,8 +28,8 @@ pythonpath = ["."]
 testpaths = ["tests"]
 
 [tool.ruff]
-# Python 3.10 is the oldest version CI tests, so rules that need newer syntax stay off.
-target-version = "py310"
+# Python 3.11 is the oldest version CI tests, so rules that need newer syntax stay off.
+target-version = "py311"
 
 [tool.ruff.lint]
 # DOC rules are in preview. Only the ones named below are turned on, so other preview rules can't appear.
