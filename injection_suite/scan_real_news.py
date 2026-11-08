@@ -9,10 +9,6 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-# The agent module builds its model on import. No request is sent, but the client needs a key.
-os.environ.setdefault("ANTHROPIC_API_KEY", "not-used")
-
-import feedparser
 from trafilatura import extract
 from trafilatura.downloads import fetch_response
 
@@ -43,7 +39,12 @@ def main() -> None:
     links = []
     items = hits = 0
     for feed_url in agent_module.ALLOWED_FEEDS:
-        for entry in feedparser.parse(feed_url).entries:
+        # The agent's own download, so feeds that need its handling, such as India TV's, are read the same way
+        feed, error = agent_module.download_feed(feed_url)
+        if feed is None:
+            print(f"FEED {error}")
+            continue
+        for entry in feed.entries:
             items += 1
             title = agent_module.clean_feed_text(entry.get("title", ""))
             summary = agent_module.clean_feed_text(entry.get("summary", ""))
