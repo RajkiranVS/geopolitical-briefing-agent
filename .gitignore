@@ -8,8 +8,10 @@ __pycache__/
 venv/
 .pytest_cache/
 .ruff_cache/
+*.egg-info/
 
 # Generated outputs
 eval_report.json
+eval_reports/
 claude-review/
 injection_suite/results/

@@ -48,7 +48,7 @@ jobs:
       - name: Byte-compile all modules
         run: python -m compileall -q .
 
-      # ruff is pinned in requirements-dev.txt, because ruff.toml uses preview rules that can change between releases.
+      # ruff is pinned in requirements-dev.txt, because its settings in pyproject.toml use preview rules that can change between releases.
       - name: Lint
         run: ruff check . --output-format=github
 
@@ -110,7 +110,7 @@ jobs:
       - name: Install project and review tooling
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt pip-audit
+          pip install -r requirements-dev.txt
 
       # The project's own code runs here, in a step without the API key. Claude reads the saved output
       # instead of running the test suite itself. The pull request's diff and commits are saved here

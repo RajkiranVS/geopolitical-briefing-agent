@@ -1,5 +1,7 @@
 # Tools for tests and linting, on top of the runtime requirements.
 -r requirements.txt
 pytest>=9,<10
-# Pinned exactly: ruff.toml uses preview docstring rules, which can change between releases.
+# Pinned exactly: the ruff settings in pyproject.toml use preview docstring rules, which can change between releases.
 ruff==0.17.3
+# Pinned like ruff, so the CI review's audit doesn't change between runs.
+pip-audit==2.10.1
