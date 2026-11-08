@@ -97,8 +97,12 @@ jobs:
           pip install -r requirements-dev.txt pip-audit
 
       # The project's own code runs here, in a step without the API key. Claude reads the saved output
-      # instead of running the test suite itself.
+      # instead of running the test suite itself. The pull request's diff and commits are saved here
+      # too, so Claude needs no git commands: git can write files anywhere through --output.
       - name: Run project checks without the API key
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
         run: |
           mkdir -p claude-review/checks
           run_check() {
@@ -110,6 +114,10 @@ jobs:
           run_check compileall python -m compileall -q .
           run_check ruff ruff check .
           run_check pip-audit pip-audit -r requirements.txt
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            git diff "origin/${BASE_REF}...HEAD" > claude-review/checks/diff.txt
+            git log --format='%h %s' "origin/${BASE_REF}..HEAD" > claude-review/checks/commits.txt
+          fi
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -133,13 +141,15 @@ jobs:
           ## Pull request context
           This run is for PR #${PR_NUMBER} (base: \`${BASE_REF}\`).
           Still review the whole project, but also add a "## Changes in this PR" section to report.md.
-          Use \`git diff origin/${BASE_REF}...HEAD\` to see what changed, and flag regressions.
+          Read \`claude-review/checks/diff.txt\` (the output of \`git diff origin/${BASE_REF}...HEAD\`) and
+          \`claude-review/checks/commits.txt\` to see what changed, and flag regressions.
           EOF
           fi
 
       # Claude can write only inside claude-review/ (an Edit rule also covers Write). It can run probe
-      # tests, but only through `env -u`, which keeps the key out of their environment. A test written
-      # to steal it could still read the parent process, so this only stops accidental exposure.
+      # tests with one exact command, so no extra pytest option can write elsewhere, and only through
+      # `env -u`, which keeps the key out of their environment. A test written to steal it could still
+      # read the parent process, so this only stops accidental exposure.
       - name: Run Claude evaluation
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -148,7 +158,7 @@ jobs:
             --model "$CLAUDE_MODEL" \
             --max-turns 25 \
             --output-format json \
-            --allowedTools "Read,Glob,Grep,TodoWrite,Edit(claude-review/**),Bash(env -u ANTHROPIC_API_KEY python -m pytest claude-review/probe_tests:*),Bash(pip list:*),Bash(pip show:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git status:*),Bash(ls:*),Bash(wc:*),Bash(mkdir -p claude-review:*)" \
+            --allowedTools "Read,Glob,Grep,TodoWrite,Edit(claude-review/**),Bash(env -u ANTHROPIC_API_KEY python -m pytest claude-review/probe_tests -v),Bash(mkdir -p claude-review/probe_tests),Bash(pip list:*),Bash(pip show:*),Bash(ls:*),Bash(wc:*)" \
             --disallowedTools "NotebookEdit,WebFetch,WebSearch" \
             > claude-review/claude-output.json
 

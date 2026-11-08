@@ -57,8 +57,10 @@ NUMBER_WORDS = {
         "nineteen", "twenty",
     ])
 } | {"thirty": "30", "forty": "40", "fifty": "50", "sixty": "60", "seventy": "70", "eighty": "80", "ninety": "90"}
-# "one" is usually a pronoun, as in "one of the talks", so it isn't read as a number.
-del NUMBER_WORDS["one"]
+# A tens word joined to a units word, as in "twenty-five" or "forty two".
+COMPOUND_NUMBER = re.compile(r"\b(twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)[- ](one|two|three|four|five|six|seven|eight|nine)\b")
+# An abbreviation written with full stops, such as "U.S.", so it can match "US".
+DOTTED_ABBREVIATION = re.compile(r"\b(?:[A-Z]\.){2,}")
 # Capitalised words that aren't facts about the story: labels, the outlets the briefing cites, and
 # common words that are only capitalised because they start a sentence.
 GROUNDING_IGNORED_WORDS = {
@@ -561,18 +563,54 @@ def check_allowed_sources(cited: list[str], allowed_domains: Sequence[str]) -> l
     """
     return [url for url in cited if not is_allowed_domain(url, allowed_domains)]
 
-def grounding_numbers(text: str) -> set[str]:
+def grounding_numbers(text: str, read_one: bool = True) -> set[str]:
     """Finds the numbers in a text, with numbers written as words turned into digits.
+
+    Args:
+        text: An item or an article.
+        read_one: Whether "one" counts as the number 1. In an item it is usually a pronoun, as
+            in "one of the talks", so it is skipped there, but an article's "one" still matches
+            an item's "1".
+
+    Returns:
+        Each number as digits, without thousands separators, such as "5000" for "5,000".
+    """
+    lowered = text.lower()
+    numbers = {str(int(NUMBER_WORDS[tens]) + int(NUMBER_WORDS[units])) for tens, units in COMPOUND_NUMBER.findall(lowered)}
+    lowered = COMPOUND_NUMBER.sub(" ", lowered)
+    numbers.update(match.replace(",", "") for match in GROUNDING_NUMBER.findall(text))
+    words = (word for word in re.findall(r"[a-z]+", lowered) if word in NUMBER_WORDS)
+    numbers.update(NUMBER_WORDS[word] for word in words if read_one or word != "one")
+    return numbers
+
+def spelled_out_initials(text: str) -> set[str]:
+    """Finds the abbreviations a text spells out, such as "UN" for "United Nations".
+
+    Args:
+        text: An article, with its original capitals.
+
+    Returns:
+        The initials of every run of two to six capitalised words, ignoring "of" and "the"
+        inside the run, so "Ministry of External Affairs" gives "MEA".
+    """
+    initials = set()
+    for run in re.findall(r"\b[A-Z][a-z]+(?:\s+(?:(?:of|the|and|for)\s+)*[A-Z][a-z]+){1,5}", text):
+        letters = "".join(word[0] for word in run.split() if word[0].isupper())
+        for start in range(len(letters)):
+            for end in range(start + 2, len(letters) + 1):
+                initials.add(letters[start:end])
+    return initials
+
+def collapse_abbreviations(text: str) -> str:
+    """Writes abbreviations such as "U.S." without full stops, as "US".
 
     Args:
         text: An item or an article.
 
     Returns:
-        Each number as digits, without thousands separators, such as "5000" for "5,000".
+        The text with dotted abbreviations collapsed.
     """
-    numbers = {match.replace(",", "") for match in GROUNDING_NUMBER.findall(text)}
-    numbers.update(NUMBER_WORDS[word] for word in re.findall(r"[a-z]+", text.lower()) if word in NUMBER_WORDS)
-    return numbers
+    return DOTTED_ABBREVIATION.sub(lambda match: match.group().replace(".", ""), text)
 
 def check_grounding(item: str, article_text: str) -> list[str]:
     """Finds the numbers and names in an item that its article doesn't contain.
@@ -589,12 +627,19 @@ def check_grounding(item: str, article_text: str) -> list[str]:
         The numbers and names missing from the article; empty if all are there.
     """
     # The list marker, such as "1.", is numbering, not a fact
-    text = URL_IN_TEXT.sub(" ", LIST_ITEM_START.sub("", item.strip()))
+    text = collapse_abbreviations(URL_IN_TEXT.sub(" ", LIST_ITEM_START.sub("", item.strip())))
+    article_with_case = collapse_abbreviations(article_text)
     article = normalize_quote_text(article_text)
-    missing = sorted(grounding_numbers(text) - grounding_numbers(article))
+    missing = sorted(grounding_numbers(text, read_one=False) - grounding_numbers(article))
     for word in dict.fromkeys(re.findall(r"\b[A-Z][A-Za-z]+\b", text)):
         # Number words are already compared as numbers
         if word.lower() in GROUNDING_IGNORED_WORDS or word.lower() in NUMBER_WORDS:
+            continue
+        # Abbreviations such as US and UK are short and case matters ("US" is not "us"), so they
+        # must appear exactly. Otherwise swapping US for UK would go unnoticed.
+        if word.isupper():
+            if not re.search(rf"\b{re.escape(word)}\b", article_with_case) and word not in spelled_out_initials(article_with_case):
+                missing.append(word)
             continue
         stem = re.sub(r"(['’]s|s)$", "", word.lower())
         if stem in GROUNDING_IGNORED_WORDS or len(stem) < 3:
