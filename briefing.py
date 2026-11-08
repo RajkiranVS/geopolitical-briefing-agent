@@ -5,6 +5,8 @@ source as a separate field. The evals check that structure directly, and the Mar
 so nothing has to parse free text back into claims.
 """
 
+from urllib.parse import urlsplit, urlunsplit
+
 from pydantic import BaseModel, Field
 
 EMPTY_SECTION_PLACEHOLDER = "Nothing to report from the fetched articles."
@@ -45,6 +47,26 @@ class SubmitBriefing(BaseModel):
 BRIEFING_TOOL = SubmitBriefing.__name__
 
 
+def display_url(url: str) -> str:
+    """Drops the query string and fragment from a link, so tracking parameters aren't shown.
+
+    The evals compare links without their query strings too, so the shown link is the one checked.
+
+    Args:
+        url: The link the model gave.
+
+    Returns:
+        The link without its query string and fragment, or unchanged if it isn't a valid URL.
+    """
+    try:
+        split_url = urlsplit(url)
+    except ValueError:
+        return url
+    if not split_url.netloc:
+        return url
+    return urlunsplit((split_url.scheme, split_url.netloc, split_url.path, "", ""))
+
+
 def render_briefing(briefing: SubmitBriefing) -> str:
     """Writes a briefing as Markdown, with each item's source after its claim.
 
@@ -57,7 +79,7 @@ def render_briefing(briefing: SubmitBriefing) -> str:
     lines = []
     for heading, items in (("Key developments", briefing.key_developments), ("Developments affecting India", briefing.india)):
         lines.append(f"## {heading}")
-        lines.extend(f"- {item.claim} (Source: {item.source_url})" for item in items)
+        lines.extend(f"- {item.claim} (Source: {display_url(item.source_url)})" for item in items)
         if not items:
             lines.append(f"- {EMPTY_SECTION_PLACEHOLDER}")
         lines.append("")

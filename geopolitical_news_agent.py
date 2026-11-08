@@ -35,13 +35,16 @@ from trafilatura import extract
 from trafilatura.downloads import fetch_response
 from trafilatura.settings import use_config
 
-from briefing import BRIEFING_TOOL, SubmitBriefing, render_briefing
+from briefing import BRIEFING_TOOL, BriefingItem, SubmitBriefing, render_briefing
 from evals import (
     DEFAULT_ALLOWED_DOMAINS,
     WITHHELD_INJECTION_SIGNS,
+    claims_repeat,
     find_injection_signs,
     is_allowed_domain,
+    item_source,
     normalize_url,
+    repeat_words,
     run_evals,
 )
 
@@ -569,6 +572,50 @@ def find_briefing(messages: Sequence[BaseMessage]) -> SubmitBriefing | None:
         logger.exception("The submitted briefing didn't fit the schema")
         return None
 
+def drop_india_repeats(briefing: SubmitBriefing) -> tuple[SubmitBriefing, list[BriefingItem]]:
+    """Removes key developments that repeat an India item from the same article.
+
+    The schema asks for each development in one section only, but the model doesn't always follow
+    it. A key development is dropped, and the India copy kept, when both cite the same article and
+    are worded alike. One article can report two different developments, so a shared link alone
+    isn't enough.
+
+    Args:
+        briefing: The briefing the model submitted.
+
+    Returns:
+        The briefing without the repeats, and the key developments that were dropped.
+    """
+    # A source that isn't a link, such as "The Hindu", names no article, so it can't make a repeat
+    india_words: dict[str, list[set[str]]] = {}
+    for item in briefing.india:
+        if source := item_source(item):
+            india_words.setdefault(source, []).append(repeat_words(item.claim))
+    kept, dropped = [], []
+    for item in briefing.key_developments:
+        words = repeat_words(item.claim)
+        is_repeat = any(claims_repeat(words, other) for other in india_words.get(item_source(item), []))
+        (dropped if is_repeat else kept).append(item)
+    return briefing.model_copy(update={"key_developments": kept}), dropped
+
+def read_briefing(messages: Sequence[BaseMessage]) -> tuple[SubmitBriefing | None, list[BriefingItem]]:
+    """Reads the submitted briefing and drops key developments that repeat an India item.
+
+    Args:
+        messages: The conversation the agent returned.
+
+    Returns:
+        The briefing to show, or None if none was submitted, and the key developments dropped from it.
+    """
+    briefing = find_briefing(messages)
+    if briefing is None:
+        return None, []
+    briefing, dropped = drop_india_repeats(briefing)
+    for item in dropped:
+        # Logged so it's visible how often the model ignores the one-section rule
+        logger.warning("Dropped a key development that repeats an India item from the same article: %s", item.source_url)
+    return briefing, dropped
+
 def build_agent(run: RunState, models: tuple | None = None):
     """Builds the agent for one run.
 
@@ -734,7 +781,7 @@ def main(argv: Sequence[str] = ()):
         print(f"The agent failed: {type(error).__name__}: {error}")
         messages = []
 
-    briefing = find_briefing(messages)
+    briefing, dropped = read_briefing(messages)
     briefing_text = render_briefing(briefing) if briefing else ""
     print("--- BRIEFING ---")
     print(briefing_text)
@@ -757,7 +804,7 @@ def main(argv: Sequence[str] = ()):
     report = run_evals(
         briefing, run.fetched, run.headline_meta,
         report_path=str(args.report or report_path_for(started)),
-        suspected_injections=run.suspected_injections, run_info=run_info,
+        suspected_injections=run.suspected_injections, run_info=run_info, dropped=dropped,
     )
     if not report["passed"]:
         sys.exit(1)

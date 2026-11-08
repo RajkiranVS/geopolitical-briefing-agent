@@ -9,11 +9,12 @@ numbers against the article, links inside a claim, and fetch notes.
 import email.utils
 import json
 import re
+from collections import Counter
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from urllib.parse import urlsplit
 
-from briefing import SubmitBriefing
+from briefing import BriefingItem, SubmitBriefing
 
 # Only these hosts may be fetched or cited.
 DEFAULT_ALLOWED_DOMAINS = ("bbc.co.uk", "bbci.co.uk", "bbc.com", "thehindu.com", "indiatvnews.com", "timesofindia.indiatimes.com")
@@ -196,6 +197,32 @@ def normalize_url(url: str) -> str:
         scheme = "https"
     return f"{scheme}://{split_url.netloc.lower()}{split_url.path}".rstrip("/")
 
+def item_source(item: BriefingItem) -> str:
+    """Gives an item's normalized source link, or an empty string if its source isn't a link.
+
+    Args:
+        item: A briefing item.
+
+    Returns:
+        The normalized link, or "" when source_url is empty or plain text such as "The Hindu".
+    """
+    source = item.source_url.strip()
+    # Schemes are case-insensitive, so HTTPS:// is a link too
+    return normalize_url(source) if source.lower().startswith("http") else ""
+
+def site_of(url: str, allowed_domains: Sequence[str]) -> str:
+    """Names the site a link is on: the allowed domain it belongs to, or else its host without "www.".
+
+    Args:
+        url: The link.
+        allowed_domains: The allowed domains, so that subdomains such as feeds.bbc.co.uk count as bbc.co.uk.
+
+    Returns:
+        The site name.
+    """
+    host = (urlsplit(url).hostname or "").removeprefix("www.")
+    return next((allowed for allowed in allowed_domains if host == allowed or host.endswith("." + allowed)), host)
+
 def extract_citations(text: str) -> list[str]:
     """Finds every URL in a text and normalizes it.
 
@@ -265,6 +292,31 @@ def check_freshness(cited: list[str], headline_meta: dict[str, str], max_hours: 
             unknown_date_urls.append(url)
     return stale_urls, unknown_date_urls
 
+def repeat_words(claim: str) -> set[str]:
+    """Gives the words of a claim that count when comparing it with another.
+
+    Args:
+        claim: The claim.
+
+    Returns:
+        Its lowercased words, without common words.
+    """
+    return set(re.findall(r"[a-z0-9]+", claim.lower())) - REPEAT_IGNORED_WORDS
+
+def claims_repeat(first: set[str], second: set[str]) -> bool:
+    """Checks whether two claims, given as their repeat_words, say the same thing.
+
+    Args:
+        first: The words of one claim.
+        second: The words of the other.
+
+    Returns:
+        True if most of the words of the shorter claim are also in the other.
+    """
+    shorter = min(len(first), len(second))
+    # A very short item can have all its words in a longer one without being the same item
+    return shorter >= REPEAT_MIN_WORDS and len(first & second) / shorter >= REPEAT_OVERLAP
+
 def check_repeated_items(briefing: SubmitBriefing) -> list[str]:
     """Finds items that repeat another item, in the same section or across the two.
 
@@ -275,13 +327,11 @@ def check_repeated_items(briefing: SubmitBriefing) -> list[str]:
         One entry per repeated pair: the start of each claim.
     """
     items = [*briefing.key_developments, *briefing.india]
-    word_sets = [set(re.findall(r"[a-z0-9]+", item.claim.lower())) - REPEAT_IGNORED_WORDS for item in items]
+    word_sets = [repeat_words(item.claim) for item in items]
     repeated = []
     for first in range(len(items)):
         for second in range(first + 1, len(items)):
-            shorter = min(len(word_sets[first]), len(word_sets[second]))
-            # A very short item can have all its words in a longer one without being the same item
-            if shorter >= REPEAT_MIN_WORDS and len(word_sets[first] & word_sets[second]) / shorter >= REPEAT_OVERLAP:
+            if claims_repeat(word_sets[first], word_sets[second]):
                 repeated.append(f"{items[first].claim[:60]} | {items[second].claim[:60]}")
     return repeated
 
@@ -470,6 +520,7 @@ def run_evals(
     now: datetime | None = None,
     suspected_injections: Sequence[str] = (),
     run_info: dict | None = None,
+    dropped: Sequence[BriefingItem] = (),
 ) -> dict:
     """Runs all the checks, prints a summary and writes the report if report_path is given.
 
@@ -482,6 +533,8 @@ def run_evals(
         now: Reference time for the freshness check; defaults to the current UTC time.
         suspected_injections: Fetched content the tools flagged or withheld as likely prompt injection.
         run_info: Details of the run to add to the report, such as the model and the request.
+        dropped: Key developments removed because they repeat an India item. They aren't shown, but
+            are still checked, so a bad item can't pass by being dropped.
 
     Returns:
         A dict containing evaluation metrics and pass/fail status.
@@ -494,9 +547,8 @@ def run_evals(
 
     cited: list[str] = []
     uncited_items, unverified_quotes, ungrounded = [], [], []
-    for item in items:
-        # Schemes are case-insensitive, so HTTPS:// is a link too
-        source = normalize_url(item.source_url.strip()) if item.source_url.strip().lower().startswith("http") else ""
+    for item in [*items, *dropped]:
+        source = item_source(item)
         if not source:
             uncited_items.append(item.claim)
             continue
@@ -529,6 +581,10 @@ def run_evals(
     # A warning: one item from five fetched articles has dropped most of the reading. It isn't a
     # failure, because what the briefing does say is still checked.
     too_few_items = briefing is not None and len(items) < min(MIN_ITEMS, len(articles))
+    # Not a check: a briefing that mostly reads one site is worth seeing, but isn't wrong
+    # Counted per shown item, so three items from one article count three times
+    shown_sources = [source for item in items if (source := item_source(item)) in articles]
+    sources_by_site = dict(Counter(site_of(source, allowed_domains) for source in shown_sources).most_common())
 
     # A briefing with nothing verified has proved nothing. Stale and undated stories are warnings:
     # feeds keep important stories for days, so failing on age would fail correct briefings.
@@ -555,7 +611,9 @@ def run_evals(
         "ungrounded": ungrounded,
         "india_off_topic": india_off_topic,
         "repeated_items": repeated_items,
+        "dropped_india_repeats": [item.model_dump() for item in dropped],
         "too_few_items": too_few_items,
+        "sources_by_site": sources_by_site,
         "stale": stale,
         "unknown_date": unknown_date,
         "suspected_injections": list(suspected_injections),
@@ -580,7 +638,10 @@ def run_evals(
     print(f"Items naming things their article doesn't (warning): {len(ungrounded)}")
     print(f"India items that don't mention India (warning): {len(india_off_topic)}")
     print(f"Repeated items (warning): {len(repeated_items)}")
+    print(f"Key developments dropped as India repeats (warning): {len(dropped)}")
     print(f"Fewer than {MIN_ITEMS} items, or than the articles fetched (warning): {'yes' if too_few_items else 'no'}")
+    sites = ", ".join(f"{site} {count}" for site, count in sources_by_site.items())
+    print(f"Items by site: {sites or 'none'}")
     print(f"Stale news warnings (>72h): {len(stale)}")
     print(f"Unknown publish date warnings: {len(unknown_date)}")
     print(f"Suspected prompt injections: {len(suspected_injections)}")
