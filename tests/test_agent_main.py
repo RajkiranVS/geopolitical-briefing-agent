@@ -1066,8 +1066,8 @@ def test_google_news_style_summary_is_not_withheld(tools, monkeypatch):
     # Regression: 70 of 162 real feed items were withheld because of encoded links inside summary HTML.
     encoded = "CBMiZkFVX3lxTE05YVFEMDFNZmRldGl5M2N6cU5rRTBocUNRclMtc2JKXzBuc2FsZXRJdTA1OVdKb0VoVHRYNzVGSHFf"
     summary = f'<a href="./articles/{encoded}" target="_blank">Foreign Secretary visits Nepal</a>&nbsp;<font color="#6f6f6f">ANI News</font>'
-    set_feed(monkeypatch, tools, tools.ALLOWED_FEEDS[2], summary=summary)
-    result = tools.get_headlines.invoke({"feed_url": tools.ALLOWED_FEEDS[2]})
+    set_feed(monkeypatch, tools, tools.ALLOWED_FEEDS[1], summary=summary)
+    result = tools.get_headlines.invoke({"feed_url": tools.ALLOWED_FEEDS[1]})
     assert "Foreign Secretary visits Nepal" in result
     assert encoded not in result
     assert tools.suspected_injections == []

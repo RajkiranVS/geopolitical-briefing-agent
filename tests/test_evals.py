@@ -391,9 +391,10 @@ def test_claim_after_reworded_placeholder_is_flagged():
 
 # is_allowed_domain
 
-def test_google_news_is_allowed():
-    """Checks that Google News links are allowed."""
-    assert is_allowed_domain("https://news.google.com/rss/articles/abc", DEFAULT_ALLOWED_DOMAINS)
+def test_google_news_is_not_allowed():
+    """Checks that Google News links are refused now that its feed is gone."""
+    # Its links open the publisher through a script, so they never gave the model an article.
+    assert not is_allowed_domain("https://news.google.com/rss/articles/abc", DEFAULT_ALLOWED_DOMAINS)
 
 def test_urls_that_clients_parse_differently_are_refused():
     """Checks that URLs whose host HTTP clients read differently are refused."""
@@ -427,7 +428,6 @@ def test_normal_urls_are_still_allowed():
         "https://www.bbc.com/news/articles/abc?at_medium=RSS",
         "https://www.thehindu.com/news/international/article123.ece",
         "https://feeds.bbci.co.uk/news/world/rss.xml",
-        "https://news.google.com/rss/search?q=India+foreign+affairs&hl=en-IN&gl=IN&ceid=IN:en",
     ):
         assert is_allowed_domain(url, DEFAULT_ALLOWED_DOMAINS), url
 

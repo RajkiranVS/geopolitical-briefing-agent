@@ -40,11 +40,11 @@ logger = logging.getLogger(__name__)
 
 model = init_chat_model(model="claude-haiku-5-5")
 
-# get_headlines only accepts these exact URLs.
+# get_headlines only accepts these exact URLs. A Google News feed was dropped: its links open the
+# publisher's page through a script, so in a test on 8 November 2026 none of 15 gave article text.
 ALLOWED_FEEDS = (
     "https://feeds.bbci.co.uk/news/world/rss.xml",
     "https://www.thehindu.com/news/international/feeder/default.rss",
-    "https://news.google.com/rss/search?q=India+foreign+affairs&hl=en-IN&gl=IN&ceid=IN:en",
 )
 
 # By default trafilatura retries without certificate checks after an SSL error.
@@ -61,7 +61,6 @@ SYSTEMPROMPT = f"""
                     URLs:
                     - {ALLOWED_FEEDS[0]}
                     - {ALLOWED_FEEDS[1]}
-                    - {ALLOWED_FEEDS[2]}
 
                     STRICTLY use only the provided urls to fetch headlines. Do not use any other sources.
 
