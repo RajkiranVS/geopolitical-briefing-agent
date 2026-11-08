@@ -55,7 +55,8 @@ geopolitical-briefing-agent/
 ├── evals.py                     # Runtime evaluation checks for the briefing output
 ├── pytest.ini                   # pytest config (adds project root to path, sets test dir)
 ├── ruff.toml                    # Lint rules, including Google style docstrings
-├── requirements.txt             # Python dependencies
+├── requirements.txt             # Runtime dependencies, with version ranges
+├── requirements-dev.txt         # Adds pytest and the pinned ruff for tests and linting
 ├── .env.example                 # Template for the required credentials
 ├── .gitignore
 ├── LICENSE                      # MIT
@@ -197,9 +198,11 @@ source .venv/bin/activate
 
 # Install dependencies
 pip install -r requirements.txt
+# Or, to also run the tests and lint
+pip install -r requirements-dev.txt
 ```
 
-> **Tip:** `requirements.txt` is unpinned. To freeze exact versions for reproducible installs, run `pip freeze > requirements.txt`.
+> **Tip:** `requirements.txt` gives each package a minimum, the version the tests were run with, and stops before the next major version. To freeze exact versions for reproducible installs, run `pip freeze > requirements-lock.txt`.
 
 ### Configuration
 
@@ -295,7 +298,7 @@ pytest -k fresh   # run only the freshness tests
 ruff check .     # lint, including docstring style
 ```
 
-CI fails if `ruff` reports anything. It pins `ruff` to 0.17.3, because the docstring rules in [`ruff.toml`](ruff.toml) are preview rules that can change between releases. Use the same version locally (`pip install ruff==0.17.3`) to get the same results.
+CI fails if `ruff` reports anything. It pins `ruff` to 0.17.3, because the docstring rules in [`ruff.toml`](ruff.toml) are preview rules that can change between releases. `requirements-dev.txt` installs the same version locally, so you get the same results.
 
 Every module, class and function has a Google style docstring, with `Args`, `Returns` and `Raises` sections where they apply. Two checks work together, because neither covers everything:
 
@@ -313,9 +316,11 @@ The docstrings of `get_headlines` and `fetch_article` are also the tool descript
 | Job | What it does | Fails the build when |
 |-----|--------------|----------------------|
 | `tests` (push to `main`, PRs, manual) | Byte-compiles every module, runs `ruff` and runs `pytest` on Python 3.10 and 3.12. | Compilation fails, `ruff` reports a problem, or any test fails |
-| `claude-evaluation` (PRs and manual only) | Runs Claude Code in headless mode (`claude -p`) with the prompt in [`.github/claude/review-prompt.md`](.github/claude/review-prompt.md). Claude reads the whole repo, runs pytest, compileall, ruff and pip-audit, and can write throwaway probe tests to confirm suspected bugs. It then scores nine dimensions: correctness, agent design, security, eval quality, tests, code quality, dependencies, docs accuracy and CI. Never: the verdict is reported as a warning, because an LLM's verdict can vary between runs on the same code |
+| `claude-evaluation` (PRs and manual only) | Runs Claude Code in headless mode (`claude -p`) with the prompt in [`.github/claude/review-prompt.md`](.github/claude/review-prompt.md). An earlier step runs pytest, compileall, ruff and pip-audit without the API key and saves their output. Claude reads the whole repo and that output, and can write throwaway probe tests to confirm suspected bugs. It then scores nine dimensions: correctness, agent design, security, eval quality, tests, code quality, dependencies, docs accuracy and CI. Never: the verdict is reported as a warning, because an LLM's verdict can vary between runs on the same code |
 
-Claude can use these tools: `Read`, `Glob`, `Grep`, `Write` and `TodoWrite`, plus a Bash allow-list for pytest, compileall, ruff, pip-audit, pip, read-only git commands, `ls` and `wc`. `Edit` and web access are blocked. Claude is told not to run the agent script, because that would make live API and network calls.
+Claude can use `Read`, `Glob`, `Grep` and `TodoWrite`, can write files only inside `claude-review/`, and has a Bash allow-list for running its probe tests, `pip list` and `pip show`, read-only git commands, `ls` and `wc`. Web access is blocked. Claude is told not to run the agent script, because that would make live API and network calls.
+
+The project's tests never run in the step that has the API key. Probe tests do, because Claude writes them during its run, but only through `env -u ANTHROPIC_API_KEY`, which keeps the key out of their environment. That stops accidental exposure, such as a test that prints its environment, not a test written to steal the key, which could still read it from the parent process. The job only runs for branches in this repository, so writing such a test needs write access. The Claude Code CLI and every action are pinned, the actions to a commit.
 
 The report goes to the job summary and is posted as a comment on PRs (the comment is updated on each run). It is also uploaded as the `claude-evaluation` artifact, with `report.md`, `verdict.json` and the raw CLI output, which includes turn count and cost.
 
@@ -450,7 +455,8 @@ The first live runs failed, and each failure was a real finding. Every fix lande
 - **The download timeout isn't a total limit.** It applies to each read, so a stalled server fails after about 2 minutes, but one that keeps sending a little at a time isn't cut off until the body reaches trafilatura's size limit. The tools only download from allowlisted hosts, which limits who could do this.
 - **Google News sometimes sends a cut-off feed with status 200.** The cause isn't known. `get_headlines` downloads a feed again if it can't be parsed. Articles have no such retry: in one test on 6 November 2026, none of 384 parallel downloads from BBC and The Hindu came back cut off, but that test didn't cover Google News article links.
 - **Freshness depends on feed metadata.** Stories without a parseable `Published` date are reported as `unknown_date`, not as stale.
-- **Dependencies are not pinned.** `requirements.txt` lists package names only.
+- **Dependencies have ranges, not exact pins.** A new minor release inside a range can still change behaviour between installs. There is no lock file.
+- **CI still tests Python 3.10**, which reached end of life in October 2026, because it is the oldest version the code supports.
 
 ---
 
