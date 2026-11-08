@@ -775,7 +775,7 @@ def main(argv: Sequence[str] = ()):
     run = RunState()
     started = datetime.now(UTC)
     try:
-        messages = build_agent(run).invoke([HumanMessage(content=args.request)])
+        messages = cast(list[BaseMessage], build_agent(run).invoke([HumanMessage(content=args.request)]))
     except Exception as error:  # noqa: BLE001
         # Still run the evals, so a crash leaves a failed report and not just a traceback
         print(f"The agent failed: {type(error).__name__}: {error}")
