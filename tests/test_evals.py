@@ -1,18 +1,22 @@
-"""Unit tests for the runtime evaluation checks in evals.py."""
+"""Unit tests for the runtime evaluation checks in evals.py and the briefing renderer."""
 
 import base64
 import email.utils
+import json
 from datetime import datetime, timedelta, timezone
 
+from briefing import (
+    EMPTY_SECTION_PLACEHOLDER,
+    BriefingItem,
+    SubmitBriefing,
+    render_briefing,
+)
 from evals import (
     DEFAULT_ALLOWED_DOMAINS,
-    EMPTY_SECTION_PLACEHOLDER,
-    check_cited_were_fetched,
+    check_fetch_notes,
     check_freshness,
     check_grounding,
-    check_items_grounded,
-    check_quotes,
-    check_uncited_items,
+    check_quote,
     extract_citations,
     find_injection_signs,
     is_allowed_domain,
@@ -20,7 +24,8 @@ from evals import (
 )
 
 NOW = datetime(2026, 11, 2, 12, 0, tzinfo=timezone.utc)
-
+GROUNDING_URL = "https://www.bbc.com/news/world-123"
+GROUNDING_ARTICLE = "Two oil tankers caught fire in the Gulf, the Revolutionary Guards said. Ministers met 5,000 delegates."
 
 def rfc2822(dt: datetime) -> str:
     """Formats a datetime the way RSS feeds do.
@@ -103,14 +108,6 @@ def test_table_pipe_not_captured():
     # Regression: found in review. The pipe made a correct citation count as never fetched.
     assert extract_citations("| Leaders met | https://www.bbc.com/news/world-123|") == ["https://www.bbc.com/news/world-123"]
 
-def test_http_and_https_citations_match():
-    """Checks that citing the http form of an article fetched over https still verifies."""
-    # Regression: found in review. The scheme had to match, so a correct briefing failed.
-    briefing = "## Asia\n- Leaders met. Source: http://www.bbc.com/news/world-123\n"
-    report = run_evals(briefing, {"https://www.bbc.com/news/world-123": "Leaders met."}, {}, report_path=None, now=NOW)
-    assert report["unverified"] == []
-    assert report["verified_count"] == 1
-
 def test_url_as_markdown_link_text_is_one_citation():
     """Checks that a Markdown link whose text is its own URL counts once."""
     briefing = "[https://www.bbc.com/news/world-123](https://www.bbc.com/news/world-123)"
@@ -127,269 +124,8 @@ def test_backtick_wrapped_url_not_captured():
     briefing = "- Talks resumed. Source: `https://www.bbc.com/news/world-123`"
     assert extract_citations(briefing) == ["https://www.bbc.com/news/world-123"]
 
-def test_backtick_wrapped_url_passes_the_eval():
-    """Checks that a correct citation in backticks passes the full eval."""
-    url = "https://www.bbc.com/news/world-123"
-    report = run_evals(f"- Talks resumed. Source: `{url}`", {url: "Article text"}, {}, report_path=None, now=NOW)
-    assert report["unverified"] == []
-    assert report["passed"] is True
 
-
-# check_cited_were_fetched
-
-def test_fake_url_is_unverified():
-    """Checks that a URL cited but never fetched is reported as unverified."""
-    cited = ["https://www.bbc.com/news/real", "https://www.bbc.com/news/fake"]
-    fetched = {"https://www.bbc.com/news/real?at_medium=RSS": "Article text"}
-    verified, unverified = check_cited_were_fetched(cited, fetched)
-    assert verified == ["https://www.bbc.com/news/real"]
-    assert unverified == ["https://www.bbc.com/news/fake"]
-
-
-# check_uncited_items
-
-def test_source_on_next_line_passes():
-    """Checks that a citation on a continuation line counts for its bullet."""
-    briefing = (
-        "## Asia\n"
-        "- Leaders met in Delhi to discuss trade.\n"
-        "  Source: https://www.thehindu.com/news/article1.ece\n"
-    )
-    assert check_uncited_items(briefing) == []
-
-def test_bullet_without_url_flagged():
-    """Checks that a bullet with no URL is flagged."""
-    briefing = "## Europe\n- Ministers agreed a new sanctions package.\n"
-    assert check_uncited_items(briefing) == ["- Ministers agreed a new sanctions package."]
-
-def test_short_placeholder_passes():
-    """Checks that a short empty-section phrase isn't flagged."""
-    briefing = "## Africa\n- Nothing significant to report.\n"
-    assert check_uncited_items(briefing) == []
-
-def test_exact_empty_section_placeholder_passes():
-    """Checks that the exact placeholder from the prompt isn't flagged."""
-    briefing = f"## India\n- {EMPTY_SECTION_PLACEHOLDER}\n"
-    assert check_uncited_items(briefing) == []
-
-def test_bullet_about_missing_coverage_flagged():
-    """Checks that a bullet about what the articles don't cover is flagged."""
-    # Regression: run 3 flagged this; the prompt now forbids it, so the eval should keep catching it.
-    item = "- **Iran conflict:** The fetched articles do not discuss direct effects on India."
-    assert check_uncited_items(f"## India\n{item}\n") == [item]
-
-def test_long_sentence_with_placeholder_phrase_flagged():
-    """Checks that a long claim containing a placeholder phrase is flagged."""
-    item = (
-        "- Despite weeks of talks there were no significant developments, but officials "
-        "now expect a ceasefire deal to be signed early next month."
-    )
-    assert check_uncited_items(f"## Middle East\n{item}\n") == [item]
-
-def test_uncited_bullet_after_fetch_notes_passes():
-    """Checks that uncited bullets in the final fetch notes aren't flagged."""
-    briefing = (
-        "## Asia\n"
-        "- Leaders met in Delhi. Source: https://www.thehindu.com/news/article1.ece\n"
-        "\n"
-        "FETCH NOTES:\n"
-        "- The Google News article on the Nepal visit could not be fetched.\n"
-    )
-    assert check_uncited_items(briefing) == []
-
-def test_uncited_bullet_before_fetch_notes_flagged():
-    """Checks that an uncited bullet before the fetch notes is flagged."""
-    briefing = (
-        "## Asia\n"
-        "- Ministers agreed a new sanctions package.\n"
-        "\n"
-        "FETCH NOTES:\n"
-        "- The BBC feed returned no entries.\n"
-    )
-    assert check_uncited_items(briefing) == ["- Ministers agreed a new sanctions package."]
-
-def test_claim_containing_placeholder_phrase_flagged():
-    """Checks that a short claim containing a placeholder phrase is flagged."""
-    # Regression: the placeholder match was a substring, so this short claim passed.
-    item = "- Iran seized a tanker; no developments elsewhere."
-    assert check_uncited_items(f"## Middle East\n{item}\n") == [item]
-
-def test_wrapped_placeholder_passes():
-    """Checks that the placeholder is accepted inside bold and quotes."""
-    assert check_uncited_items(f'## India\n- **"{EMPTY_SECTION_PLACEHOLDER}"**\n') == []
-
-def test_new_section_after_fetch_notes_is_checked():
-    """Checks that a heading section after the fetch notes is still checked."""
-    # Regression: everything after the marker was ignored, wherever it appeared.
-    briefing = (
-        "FETCH NOTES: none\n"
-        "\n"
-        "## Asia\n"
-        "- Ministers agreed a new sanctions package.\n"
-    )
-    assert check_uncited_items(briefing) == ["- Ministers agreed a new sanctions package."]
-
-def test_bold_section_after_fetch_notes_is_checked():
-    """Checks that a bold section after the fetch notes is still checked."""
-    briefing = (
-        "FETCH NOTES: none\n"
-        "\n"
-        "**Asia**\n"
-        "- Ministers agreed a new sanctions package.\n"
-    )
-    assert check_uncited_items(briefing) == ["- Ministers agreed a new sanctions package."]
-
-def test_marker_inside_item_is_not_accepted():
-    """Checks that a marker in the middle of a bullet doesn't start the notes."""
-    item = "- Ministers met. FETCH NOTES: they agreed a new sanctions package."
-    assert check_uncited_items(f"## Asia\n{item}\n") == [item]
-
-def test_claim_between_two_markers_flagged():
-    """Checks that only the last marker starts the notes."""
-    briefing = (
-        "FETCH NOTES:\n"
-        "- Ministers agreed a new sanctions package.\n"
-        "\n"
-        "FETCH NOTES: none\n"
-    )
-    assert check_uncited_items(briefing) == ["- Ministers agreed a new sanctions package."]
-
-def test_bold_fetch_notes_marker_accepted():
-    """Checks that a bold marker with the colon inside the bold is recognised."""
-    briefing = (
-        "## Asia\n"
-        "- Leaders met in Delhi. Source: https://www.thehindu.com/news/article1.ece\n"
-        "\n"
-        "**FETCH NOTES:** none\n"
-        "- The BBC feed returned no entries.\n"
-    )
-    assert check_uncited_items(briefing) == []
-
-def test_lowercase_fetch_notes_marker_accepted():
-    """Checks that the marker is recognised in any case."""
-    briefing = (
-        "## Asia\n"
-        "- Leaders met in Delhi. Source: https://www.thehindu.com/news/article1.ece\n"
-        "\n"
-        "Fetch notes:\n"
-        "- The BBC feed returned no entries.\n"
-    )
-    assert check_uncited_items(briefing) == []
-
-def test_sub_heading_inside_fetch_notes_accepted():
-    """Checks that a sub-heading over fetch problems stays part of the notes."""
-    # Regression: any heading after the marker made a correct briefing fail.
-    for heading in ("**Feed issues:**", "### Feed issues"):
-        briefing = (
-            "FETCH NOTES:\n"
-            f"{heading}\n"
-            "- The BBC feed returned no entries.\n"
-            "- The Google News article could not be fetched.\n"
-        )
-        assert check_uncited_items(briefing) == []
-
-def test_sub_heading_with_none_inside_fetch_notes_accepted():
-    """Checks that a sub-heading over a "None" bullet stays part of the notes."""
-    assert check_uncited_items("FETCH NOTES:\n**Feed issues:**\n- None.\n") == []
-
-def test_news_claim_beside_fetch_problem_under_heading_flagged():
-    """Checks that a news claim in a heading section after the notes is flagged."""
-    briefing = (
-        "FETCH NOTES:\n"
-        "- The BBC feed returned no entries.\n"
-        "\n"
-        "## Asia\n"
-        "- Ministers agreed a new sanctions package.\n"
-    )
-    assert check_uncited_items(briefing) == [
-        "- The BBC feed returned no entries.",
-        "- Ministers agreed a new sanctions package.",
-    ]
-
-def test_news_claim_in_fetch_notes_is_flagged():
-    """Checks that a news claim inside the fetch notes is flagged, even with no heading after it."""
-    # Regression: with no heading after the marker, everything after it was ignored.
-    for notes in ("FETCH NOTES: none\n- Ministers agreed a new sanctions package.\n", "FETCH NOTES:\nIran seized a tanker in the Gulf.\n"):
-        briefing = f"## Asia\n- Leaders met in Delhi. Source: https://www.thehindu.com/news/article1.ece\n\n{notes}"
-        flagged = check_uncited_items(briefing)
-        assert len(flagged) == 1, notes
-        assert "Leaders met" not in flagged[0]
-
-def test_real_fetch_notes_wording_accepted():
-    """Checks that fetch notes worded the way real runs word them aren't flagged."""
-    notes = (
-        "FETCH NOTES:\n"
-        "- BBC feed loaded successfully.\n"
-        "- The BBC article on India-Nepal talks contained embedded instructions about how to summarise it. I ignored them.\n"
-        "- Only two articles were fetched successfully, so the briefing is limited in scope.\n"
-        "- Other Google News items were headline-only and were not reported.\n"
-        "- The Google News links redirect to pages that could not be read.\n"
-    )
-    assert check_uncited_items(f"## Asia\n- Leaders met. Source: https://www.thehindu.com/news/article1.ece\n\n{notes}") == []
-
-def test_notes_saying_there_were_no_problems_accepted():
-    """Checks that notes reporting no problems, without naming a feed, don't fail the briefing."""
-    # Regression: found in review. "No issues." has none of the run words, so a correct briefing failed.
-    for line in ("- No issues.", "- No problems to report.", "No errors.", "- No issue.", "- **No problems found.**"):
-        briefing = f"## Asia\n- Leaders met. Source: https://www.thehindu.com/news/article1.ece\n\nFETCH NOTES:\n{line}\n"
-        assert check_uncited_items(briefing) == [], line
-
-def test_problems_without_no_in_notes_is_still_flagged():
-    """Checks that the word "problems" alone doesn't let a news claim through the notes."""
-    # Regression: found in review. Matching "no problems" anywhere in the line let this claim through.
-    for item in ("- Iran faced problems at the border crossing.", "- Iran faced no problems at the border crossing."):
-        briefing = f"## Asia\n- Leaders met. Source: https://www.thehindu.com/news/article1.ece\n\nFETCH NOTES:\n{item}\n"
-        assert item in check_uncited_items(briefing), item
-
-def test_fetch_notes_marker_with_bold_closing_before_colon_accepted():
-    """Checks that a marker with the bold closing before the colon is recognised."""
-    # Regression: only a marker with the colon inside the bold was recognised.
-    briefing = (
-        "## Asia\n"
-        "- Leaders met in Delhi. Source: https://www.thehindu.com/news/article1.ece\n"
-        "\n"
-        "**FETCH NOTES**:\n"
-        "- The BBC feed returned no entries.\n"
-    )
-    assert check_uncited_items(briefing) == []
-
-def test_bold_marker_inside_item_is_not_accepted():
-    """Checks that a bold marker in the middle of a bullet doesn't start the notes."""
-    item = "- Ministers met. **FETCH NOTES**: they agreed a new sanctions package."
-    assert check_uncited_items(f"## Asia\n{item}\n") == [item]
-
-def test_new_section_after_bold_marker_is_checked():
-    """Checks that a heading section after a bold marker is still checked."""
-    briefing = "**FETCH NOTES**: none\n\n## Asia\n- Ministers agreed a new sanctions package.\n"
-    assert check_uncited_items(briefing) == ["- Ministers agreed a new sanctions package."]
-
-def test_reworded_placeholders_pass():
-    """Checks that the rewordings seen in real runs aren't flagged."""
-    # Regression: real runs failed on these, though they report no news.
-    for text in (
-        "Nothing further from the fetched articles bears directly on India.",
-        "Nothing else to report from the fetched articles on India's direct foreign policy.",
-        "Nothing more from the fetched articles.",
-    ):
-        assert check_uncited_items(f"## India\n- {text}\n") == [], text
-
-def test_claim_after_reworded_placeholder_is_flagged():
-    """Checks that a news claim can't follow a reworded placeholder."""
-    for text in (
-        "Nothing to report from the fetched articles on Iran, which seized a tanker.",
-        "Nothing from the fetched articles; Iran seized a tanker.",
-        "Nothing further from the fetched articles. Iran seized a tanker.",
-        "Nothing to report from the fetched articles on Iran seized a tanker and killed 50 people in a raid",
-        # Regression: free text was accepted as the topic, so this short claim passed.
-        "Nothing to report from the fetched articles on Iran seized a tanker",
-        "Nothing further from the fetched articles about India closing its border",
-        "Nothing from the fetched articles on India's foreign minister resigning",
-    ):
-        item = f"- {text}"
-        assert check_uncited_items(f"## India\n{item}\n") == [item], text
-
-
-# is_allowed_domain
+# is_allowed_domain and the injection screen
 
 def test_google_news_is_not_allowed():
     """Checks that Google News links are refused now that its feed is gone."""
@@ -414,13 +150,6 @@ def test_malformed_urls_are_refused_not_raised():
     # Regression: urlsplit raises ValueError on these, which crashed the run.
     for url in ("http://[::1", "http://[bad", "http://127.0.0.1／@bbc.com/a"):
         assert not is_allowed_domain(url, DEFAULT_ALLOWED_DOMAINS), url
-
-def test_malformed_citation_is_unverified_not_raised():
-    """Checks that a malformed citation fails the eval without raising."""
-    briefing = "- Talks resumed. http://127.0.0.1／@bbc.com/a"
-    report = run_evals(briefing, {}, {}, report_path=None, now=NOW)
-    assert report["passed"] is False
-    assert report["unverified"] == ["http://127.0.0.1／@bbc.com/a"]
 
 def test_normal_urls_are_still_allowed():
     """Checks that ordinary article and feed URLs are allowed."""
@@ -490,41 +219,7 @@ def test_missing_and_bad_dates_are_unknown():
     assert unknown == [missing, marked_unknown, garbage]
 
 
-# run_evals
-
-def clean_inputs():
-    """Builds inputs for a briefing that should pass every check.
-
-    Returns:
-        A tuple (url, briefing, fetched, headline_meta).
-    """
-    url = "https://www.bbc.com/news/world-123"
-    briefing = f"## Asia\n- Leaders met to discuss trade. (Source: {url})\n"
-    fetched = {f"{url}?at_medium=RSS": "Leaders met to discuss trade."}
-    headline_meta = {url: rfc2822(NOW - timedelta(hours=2))}
-    return url, briefing, fetched, headline_meta
-
-def test_clean_briefing_passes():
-    """Checks that a correct briefing passes every check."""
-    _, briefing, fetched, headline_meta = clean_inputs()
-    report = run_evals(briefing, fetched, headline_meta, report_path=None, now=NOW)
-    assert report["passed"] is True
-    assert report["verified_count"] == 1
-    assert report["stale"] == []
-    assert report["off_list"] == []
-
-def test_custom_allowed_domains():
-    """Checks that a custom domain list replaces the default one."""
-    url, briefing, fetched, headline_meta = clean_inputs()
-    report = run_evals(briefing, fetched, headline_meta, report_path=None, allowed_domains=["reuters.com"], now=NOW)
-    assert report["off_list"] == [url]
-
-def test_suspected_injections_are_reported_but_do_not_fail():
-    """Checks that suspected injections appear in the report without failing it."""
-    _, briefing, fetched, headline_meta = clean_inputs()
-    report = run_evals(briefing, fetched, headline_meta, report_path=None, now=NOW, suspected_injections=["u: encoded payload"])
-    assert report["suspected_injections"] == ["u: encoded payload"]
-    assert report["passed"] is True
+# find_injection_signs
 
 def test_injection_signs_found():
     """Checks that each kind of injection text gets its label."""
@@ -567,217 +262,8 @@ def test_ordinary_news_has_no_injection_signs():
     ):
         assert find_injection_signs(text) == [], text
 
-def test_report_output_is_ascii(capsys):
-    """Checks that the printed report is ASCII, so piped output works on Windows.
 
-    Args:
-        capsys: Pytest fixture that captures printed output.
-    """
-    # Regression: emoji in the status line crashed piped output on Windows (cp1252).
-    _, briefing, fetched, headline_meta = clean_inputs()
-    run_evals(briefing, fetched, headline_meta, report_path=None, now=NOW)
-    assert capsys.readouterr().out.isascii()
-
-def test_empty_briefing_fails():
-    """Checks that an empty briefing fails."""
-    # Regression: with nothing to check, every check came back clean.
-    report = run_evals("", {}, {}, report_path=None, now=NOW)
-    assert report["passed"] is False
-    assert report["verified_count"] == 0
-
-def test_prose_only_briefing_fails():
-    """Checks that a briefing with no citations or bullets fails."""
-    briefing = "Ministers agreed a new sanctions package, officials said on Monday."
-    report = run_evals(briefing, {}, {}, report_path=None, now=NOW)
-    assert report["passed"] is False
-
-def test_refusal_fails_even_with_fetched_articles():
-    """Checks that a refusal fails even when articles were fetched."""
-    _, _, fetched, headline_meta = clean_inputs()
-    report = run_evals("I can't produce a briefing today.", fetched, headline_meta, report_path=None, now=NOW)
-    assert report["passed"] is False
-
-def test_all_empty_sections_fails():
-    """Checks that a briefing with only empty sections fails."""
-    briefing = f"## Key developments\n- {EMPTY_SECTION_PLACEHOLDER}\n\n## India\n- {EMPTY_SECTION_PLACEHOLDER}\n"
-    report = run_evals(briefing, {}, {}, report_path=None, now=NOW)
-    assert report["uncited_items"] == []
-    assert report["passed"] is False
-
-
-# check_quotes
-
-QUOTE_URL = "https://www.bbc.com/news/world-123"
-QUOTE_ARTICLE = {QUOTE_URL: "The minister said the talks were “frank and constructive” and that trade would resume — after a review of tariffs."}
-
-def test_exact_quote_passes():
-    """Checks that a quote found word for word in the cited article passes."""
-    briefing = f'- The minister called the talks "frank and constructive". Source: {QUOTE_URL}'
-    assert check_quotes(briefing, QUOTE_ARTICLE) == []
-
-def test_quote_with_different_quote_marks_dashes_and_punctuation_passes():
-    """Checks that curly quotes, dashes, case and a full stop inside the quote don't count as changes."""
-    # Regression: a real briefing quoted "unauthorised routes." with the full stop inside the quotation marks.
-    briefing = f'- The minister said trade “Would Resume - after a review of tariffs.” Source: {QUOTE_URL}'
-    assert check_quotes(briefing, QUOTE_ARTICLE) == []
-
-def test_quote_with_ellipsis_passes_when_parts_appear_in_order():
-    """Checks that an ellipsis may stand for left-out text, but the parts must keep their order."""
-    passing = f'- He said "the talks were ... and that trade would resume". Source: {QUOTE_URL}'
-    reordered = f'- He said "trade would resume ... the talks were". Source: {QUOTE_URL}'
-    assert check_quotes(passing, QUOTE_ARTICLE) == []
-    assert len(check_quotes(reordered, QUOTE_ARTICLE)) == 1
-
-def test_changed_quote_fails_the_eval():
-    """Checks that a quote whose wording changed fails the briefing."""
-    briefing = f'- The minister called the talks "frank and productive". Source: {QUOTE_URL}'
-    report = run_evals(briefing, QUOTE_ARTICLE, {QUOTE_URL: rfc2822(NOW - timedelta(hours=2))}, report_path=None, now=NOW)
-    assert report["unverified_quotes"] == [f'"frank and productive" in: {briefing[:80]}']
-    assert report["verified_count"] == 1
-    assert report["passed"] is False
-
-def test_quote_must_come_from_the_article_its_item_cites():
-    """Checks that a quote found only in a different article than the one cited fails."""
-    other = "https://www.thehindu.com/news/article1.ece"
-    articles = {**QUOTE_ARTICLE, other: "Officials described the visit as routine."}
-    briefing = f'- Officials called the talks "frank and constructive". Source: {other}'
-    assert len(check_quotes(briefing, articles)) == 1
-
-def test_single_words_and_uncited_items_are_not_quote_checked():
-    """Checks that single quoted words and items citing no fetched article are skipped."""
-    briefing = (
-        f'- The so-called "reset" was discussed. Source: {QUOTE_URL}\n'
-        '- He said "something nobody wrote down". Source: https://www.bbc.com/news/not-fetched\n'
-    )
-    assert check_quotes(briefing, QUOTE_ARTICLE) == []
-
-def test_made_up_quote_in_single_quotes_fails():
-    """Checks that a quote in single quotes, straight or curly, is checked too."""
-    # Regression: found in review. Only double quotes were checked.
-    for quote in ("'the talks collapsed in disarray'", "‘the talks collapsed in disarray’"):
-        briefing = f"- The minister said {quote} on Monday. Source: {QUOTE_URL}"
-        assert len(check_quotes(briefing, QUOTE_ARTICLE)) == 1, quote
-    exact = f"- The minister called the talks 'frank and constructive'. Source: {QUOTE_URL}"
-    assert check_quotes(exact, QUOTE_ARTICLE) == []
-
-def test_apostrophes_and_short_single_quotes_are_not_quotes():
-    """Checks that apostrophes and one or two words in single quotes aren't checked as quotes."""
-    briefing = (
-        "- India's and Nepal's ministers didn't agree, the parties' leaders said, "
-        f"and India’s envoy gave 'no comment' on the 'reset'. Source: {QUOTE_URL}"
-    )
-    assert check_quotes(briefing, QUOTE_ARTICLE) == []
-
-def test_made_up_quote_in_a_heading_fails():
-    """Checks that a quote in a heading must appear in one of the fetched articles."""
-    # Regression: found in review. Headings aren't items, so their quotes were never checked.
-    briefing = f'## "Talks collapsed in disarray"\n- Leaders met. Source: {QUOTE_URL}\n'
-    assert len(check_quotes(briefing, QUOTE_ARTICLE)) == 1
-    real = f'## Minister calls talks "frank and constructive"\n- Leaders met. Source: {QUOTE_URL}\n'
-    assert check_quotes(real, QUOTE_ARTICLE) == []
-
-def test_unverified_citation_fails_alongside_verified_one():
-    """Checks that one unverified citation fails a briefing with a verified one."""
-    _, briefing, fetched, headline_meta = clean_inputs()
-    briefing += "- Talks collapsed. (Source: https://www.bbc.com/news/not-fetched)\n"
-    report = run_evals(briefing, fetched, headline_meta, report_path=None, now=NOW)
-    assert report["verified_count"] == 1
-    assert report["passed"] is False
-
-def test_briefing_with_no_news_fails_even_with_a_link_in_the_notes():
-    """Checks that a link in the fetch notes doesn't count as a citation."""
-    # Regression: found in review. A fetched article's link in the notes let a briefing with no news pass.
-    url = "https://www.bbc.com/news/world-123"
-    briefing = (
-        f"## Key developments\n- {EMPTY_SECTION_PLACEHOLDER}\n\n"
-        f"FETCH NOTES:\n- The BBC article ({url}) was fetched.\n"
-    )
-    report = run_evals(briefing, {url: "Article text."}, {}, report_path=None, now=NOW)
-    assert report["verified_count"] == 0
-    assert report["passed"] is False
-
-def test_failed_article_named_in_the_notes_does_not_fail_the_briefing():
-    """Checks that the notes may name the link of an article that failed to download."""
-    # Regression: found in review. That link counted as cited but never fetched.
-    _, briefing, fetched, headline_meta = clean_inputs()
-    briefing += "\nFETCH NOTES:\n- The Google News article https://news.google.com/rss/articles/CBMiabc could not be fetched.\n"
-    report = run_evals(briefing, fetched, headline_meta, report_path=None, now=NOW)
-    assert report["unverified"] == []
-    assert report["passed"] is True
-
-def test_uncited_prose_fails_alongside_verified_bullet():
-    """Checks that an uncited paragraph fails a briefing that has a verified bullet."""
-    # Regression: only list items were checked, so this paragraph passed.
-    _, briefing, fetched, headline_meta = clean_inputs()
-    briefing += "\nMinisters agreed a new sanctions package, officials said on Monday.\n"
-    report = run_evals(briefing, fetched, headline_meta, report_path=None, now=NOW)
-    assert report["uncited_items"] == ["Ministers agreed a new sanctions package, officials said on Monday."]
-    assert report["passed"] is False
-
-def test_labels_and_cited_prose_pass():
-    """Checks that titles, headings, rules, a bare placeholder and cited prose need no bullet."""
-    briefing = (
-        "**Today's Geopolitical Briefing** (feeds dated Thu, 05 Nov 2026)\n"
-        "\n"
-        "# Briefing\n"
-        "## Key developments\n"
-        "Leaders met in Delhi to discuss trade.\n"
-        "Source: https://www.thehindu.com/news/article1.ece\n"
-        "\n"
-        "---\n"
-        "**India:**\n"
-        "Nothing to report from the fetched articles.\n"
-    )
-    assert check_uncited_items(briefing) == []
-
-def test_plain_text_headings_and_intro_lines_pass():
-    """Checks that headings and intro lines written without Markdown need no citation."""
-    # Regression: found in review. These failed a valid briefing once prose was checked.
-    for label in ("Key developments:", "KEY DEVELOPMENTS", "Here is your briefing based on the fetched articles:", "DEVELOPMENTS AFFECTING INDIA"):
-        briefing = f"{label}\n- Leaders met in Delhi. Source: https://www.thehindu.com/news/article1.ece\n"
-        assert check_uncited_items(briefing) == [], label
-
-def test_uncited_sentence_is_still_flagged_beside_labels():
-    """Checks that the label rules don't let an ordinary uncited sentence through."""
-    item = "Iran seized a tanker in the Gulf, officials said on Monday."
-    assert check_uncited_items(f"Key developments:\n\n{item}\n") == [item]
-    # Short lowercase and numbered sentences aren't labels either
-    for item in ("Iran seized a tanker", "Here is why Iran seized 3 tankers."):
-        assert check_uncited_items(f"{item}\n") == [item], item
-
-def test_claim_ending_in_a_colon_is_flagged_when_nothing_follows():
-    """Checks that a line ending in a colon is only a label when content follows it."""
-    # Regression: found in review. Any line of up to 120 characters ending in a colon skipped the citation check.
-    claim = "Iran has seized three tankers, Reuters said:"
-    url = "https://www.thehindu.com/news/article1.ece"
-    for briefing in (f"{claim}\n", f"{claim}\n\n## India\n- Leaders met. Source: {url}\n", f"{claim}\n\nFETCH NOTES: none\n"):
-        assert claim in check_uncited_items(briefing), briefing
-
-def test_colon_labels_before_content_still_pass():
-    """Checks that real labels followed by an item or a placeholder still need no citation."""
-    url = "https://www.thehindu.com/news/article1.ece"
-    for briefing in (
-        f"Key developments:\n- Leaders met. Source: {url}\n",
-        f"India:\n\n{EMPTY_SECTION_PLACEHOLDER}\n",
-        f"Here is a summary of today's news from the fetched articles:\n\n- Leaders met. Source: {url}\n",
-    ):
-        assert check_uncited_items(briefing) == [], briefing
-
-def test_claim_ending_in_a_colon_in_the_notes_is_flagged():
-    """Checks that the colon rule also applies inside the fetch notes."""
-    # Regression: found in review. Inside the notes, any line ending in a colon was skipped.
-    claim = "Iran has seized three tankers, Reuters said:"
-    url = "https://www.thehindu.com/news/article1.ece"
-    briefing = f"## Asia\n- Leaders met. Source: {url}\n\nFETCH NOTES:\n- The BBC feed returned no entries.\n{claim}\n"
-    assert claim in " ".join(check_uncited_items(briefing))
-    with_sub_heading = f"## Asia\n- Leaders met. Source: {url}\n\nFETCH NOTES:\nFeed problems:\n- The BBC feed returned no entries.\n"
-    assert check_uncited_items(with_sub_heading) == []
-
-
-# check_grounding and check_items_grounded
-
-GROUNDING_URL = "https://www.bbc.com/news/world-123"
-GROUNDING_ARTICLE = "Two oil tankers caught fire in the Gulf, the Revolutionary Guards said. Ministers met 5,000 delegates."
+# check_grounding
 
 def test_grounding_ignores_case_plurals_number_formats_and_sentence_starts():
     """Checks that differences in case, plural endings and number formatting aren't flagged."""
@@ -789,26 +275,6 @@ def test_grounding_flags_names_and_numbers_the_article_lacks():
     """Checks that a place or number the article doesn't contain is reported."""
     item = f"- Three tankers caught fire in the Gulf of Oman. Source: {GROUNDING_URL}"
     assert check_grounding(item, GROUNDING_ARTICLE) == ["3", "Oman"]
-
-def test_ungrounded_item_is_a_warning_not_a_failure():
-    """Checks that the grounding result is reported without failing the briefing."""
-    item = f"- Two tankers caught fire in the Gulf of Oman. Source: {GROUNDING_URL}"
-    report = run_evals(f"## Gulf\n{item}\n", {GROUNDING_URL: GROUNDING_ARTICLE}, {}, report_path=None, now=NOW)
-    assert report["ungrounded"] == [f"{item[:80]}: not in the cited article: Oman"]
-    assert report["passed"] is True
-
-def test_grounding_uses_only_the_cited_articles():
-    """Checks that a name is looked up in the articles its item cites, not in every fetched article."""
-    other = "https://www.thehindu.com/news/article1.ece"
-    articles = {GROUNDING_URL: GROUNDING_ARTICLE, other: "Talks were held in Oman."}
-    briefing = f"- Tankers caught fire in the Gulf of Oman. Source: {GROUNDING_URL}\n"
-    assert len(check_items_grounded(briefing, articles)) == 1
-
-def test_grounding_ignores_list_numbers_and_the_word_one():
-    """Checks that a numbered list marker and "one" used as a pronoun aren't read as facts."""
-    # Regression: found in review. "1." and "one" were reported as numbers missing from the article.
-    item = f"1. One of the tankers caught fire in the Gulf. Source: {GROUNDING_URL}"
-    assert check_grounding(item, GROUNDING_ARTICLE) == []
 
 def test_grounding_catches_a_swapped_abbreviation():
     """Checks that short abbreviations are compared exactly, so US and UK can't be swapped."""
@@ -832,62 +298,249 @@ def test_grounding_matches_numbers_written_differently():
     article = "Twenty-five sailors were rescued and one tanker sank."
     assert check_grounding("- 25 sailors were rescued and 1 tanker sank.", article) == []
 
-def test_bold_marker_with_colon_inside_and_bullets_accepted():
-    """Checks that notes after a marker with the wrapper closing after the colon are recognised."""
-    # Regression: found in review. The closing "**" was left on the marker line and failed the notes check.
-    for marker in ("**FETCH NOTES:**", "_FETCH NOTES:_", "**Fetch notes:**"):
-        briefing = (
-            "## Asia\n"
-            "- Leaders met in Delhi. Source: https://www.thehindu.com/news/article1.ece\n"
-            "\n"
-            f"{marker}\n"
-            "- The BBC feed returned no entries.\n"
-        )
-        assert check_uncited_items(briefing) == [], marker
 
-def test_intro_sentences_and_separate_source_lines_pass():
-    """Checks other natural shapes: an intro sentence, a long intro and a citation in its own paragraph or line."""
-    # Regression: found in review. Each of these failed a valid briefing.
-    url = "https://www.thehindu.com/news/article1.ece"
-    for briefing in (
-        f"Here is today's briefing.\n\n- Leaders met in Delhi. Source: {url}\n",
-        (
-            "Here is a summary of the most important developments from the fetched BBC, Hindu and Google News articles today:\n"
-            f"- Leaders met in Delhi. Source: {url}\n"
-        ),
-        f"Leaders met in Delhi to discuss trade.\n\nSource: {url}\n",
-        f"- Leaders met in Delhi to discuss trade.\nSource:\n{url}\n",
-        f"Leaders met in Delhi to discuss trade.\n\nSource: [The Hindu]({url})\n",
-    ):
-        assert check_uncited_items(briefing) == [], briefing
+# run_evals on a submitted briefing
 
-def test_source_paragraph_cannot_carry_a_claim():
-    """Checks that a paragraph starting with "Sources" only counts as a citation if it is one."""
-    # Regression: found in review. Any paragraph starting "Source" was joined to the cited item before it.
-    url = "https://www.thehindu.com/news/article1.ece"
-    item = "Sources say Iran seized a tanker in the Gulf."
-    assert check_uncited_items(f"- Leaders met in Delhi. Source: {url}\n\n{item}\n") == [item]
+URL = "https://www.bbc.com/news/world-123"
+OTHER_URL = "https://www.thehindu.com/news/international/article1.ece"
+ARTICLE = "Leaders met in Delhi on Tuesday to discuss trade, officials said."
 
-def test_wrapped_bullet_line_ending_in_a_colon_stays_in_the_bullet():
-    """Checks that a continuation line ending in a colon doesn't split its bullet."""
-    # Regression: found in review. The line was read as a label, so the bullet lost its citation.
-    briefing = (
-        "- Ministers met in Delhi on Tuesday and said\n"
-        "  that three points were agreed:\n"
-        "  tariffs, transit and visas. Source: https://www.thehindu.com/news/article1.ece\n"
-    )
-    assert check_uncited_items(briefing) == []
 
-def test_bold_line_inside_a_bullet_stays_in_the_bullet():
-    """Checks that a bold line or a rule inside a bullet doesn't split it from its citation."""
-    # Regression: found in review. A bold continuation line ended the bullet, so it lost its citation.
-    for middle in ("**Trade talks resume**", "---"):
-        briefing = f"- Ministers met in Delhi on Tuesday.\n  {middle}\n  (The Hindu, https://www.thehindu.com/news/article1.ece)\n"
-        assert check_uncited_items(briefing) == [], middle
+def make_briefing(key_developments=(), india=(), fetch_notes=()):
+    """Builds a submitted briefing.
 
-def test_source_paragraph_after_a_heading_does_not_cite_the_previous_section():
-    """Checks that a citation paragraph can't rescue an uncited item from an earlier section."""
-    # Regression: found in review. The citation joined the last item, whatever came between them.
-    item = "- Ministers agreed a new sanctions package."
-    briefing = f"## Europe\n{item}\n\n## India\nSource: https://www.thehindu.com/news/article1.ece\n"
-    assert item in check_uncited_items(briefing)
+    Args:
+        key_developments: (claim, source_url) pairs for the key developments.
+        india: (claim, source_url) pairs for the India section.
+        fetch_notes: The fetch notes.
+
+    Returns:
+        The briefing.
+    """
+    def items(pairs):
+        """Turns (claim, source_url) pairs into items.
+
+        Args:
+            pairs: The pairs.
+
+        Returns:
+            The items.
+        """
+        return [BriefingItem(claim=claim, source_url=url) for claim, url in pairs]
+
+    return SubmitBriefing(key_developments=items(key_developments), india=items(india), fetch_notes=list(fetch_notes))
+
+
+def evaluate(briefing, fetched=None, **kwargs):
+    """Runs the evals on a briefing with one fetched article by default.
+
+    Args:
+        briefing: The submitted briefing, or None.
+        fetched: The fetched articles; defaults to ARTICLE at URL.
+        **kwargs: Other run_evals options.
+
+    Returns:
+        The report.
+    """
+    fetched = {URL: ARTICLE} if fetched is None else fetched
+    return run_evals(briefing, fetched, {URL: rfc2822(NOW - timedelta(hours=2))}, report_path=None, now=NOW, **kwargs)
+
+
+def test_clean_briefing_passes():
+    """Checks that a briefing whose items cite fetched articles passes."""
+    report = evaluate(make_briefing([("Leaders met in Delhi to discuss trade.", URL)]))
+    assert report["passed"] is True
+    assert report["verified_count"] == 1
+    assert report["stale"] == [] and report["off_list"] == []
+
+def test_source_that_was_never_fetched_fails():
+    """Checks that an item citing an article that wasn't fetched fails the briefing."""
+    report = evaluate(make_briefing([("Leaders met.", URL), ("Talks collapsed.", "https://www.bbc.com/news/not-fetched")]))
+    assert report["unverified"] == ["https://www.bbc.com/news/not-fetched"]
+    assert report["passed"] is False
+
+def test_link_inside_a_claim_must_also_have_been_fetched():
+    """Checks that a link written into a claim counts as a citation too."""
+    report = evaluate(make_briefing([("Leaders met, see https://www.bbc.com/news/other.", URL)]))
+    assert report["unverified"] == ["https://www.bbc.com/news/other"]
+    assert report["passed"] is False
+
+def test_item_without_a_source_fails():
+    """Checks that an item whose source isn't a link fails as uncited."""
+    report = evaluate(make_briefing([("Leaders met.", URL), ("Talks collapsed.", ""), ("Iran seized a tanker.", "BBC")]))
+    assert report["uncited_items"] == ["Talks collapsed.", "Iran seized a tanker."]
+    assert report["passed"] is False
+
+def test_http_and_https_sources_match():
+    """Checks that an http source matches an article fetched over https."""
+    # Regression: found in review. The scheme had to match, so a correct briefing failed.
+    report = evaluate(make_briefing([("Leaders met.", "http://www.bbc.com/news/world-123")]))
+    assert report["verified_count"] == 1 and report["passed"] is True
+
+def test_no_briefing_and_empty_briefing_fail():
+    """Checks that a run with no briefing, or with no items, fails."""
+    # Regression: with nothing to check, every check came back clean.
+    assert evaluate(None)["passed"] is False
+    empty = evaluate(make_briefing(fetch_notes=["BBC feed loaded."]))
+    assert empty["passed"] is False and empty["verified_count"] == 0
+
+def test_off_list_source_fails_on_its_own():
+    """Checks that a source outside the allowed domains fails, even if it was somehow fetched."""
+    off_list = "https://collector.example/page"
+    report = evaluate(make_briefing([("Leaders met.", off_list)]), fetched={off_list: ARTICLE})
+    assert report["off_list"] == [off_list]
+    assert report["passed"] is False
+
+def test_stale_story_is_a_warning_not_a_failure():
+    """Checks that an old story is reported but doesn't fail the briefing."""
+    report = run_evals(make_briefing([("Leaders met.", URL)]), {URL: ARTICLE}, {URL: rfc2822(NOW - timedelta(days=4))}, report_path=None, now=NOW)
+    assert report["stale"] == [URL]
+    assert report["passed"] is True
+
+def test_suspected_injections_are_reported_but_do_not_fail():
+    """Checks that suspected injections appear in the report without failing it."""
+    report = evaluate(make_briefing([("Leaders met.", URL)]), suspected_injections=["u: encoded payload"])
+    assert report["suspected_injections"] == ["u: encoded payload"]
+    assert report["passed"] is True
+
+def test_report_records_the_run_and_the_briefing(tmp_path):
+    """Checks that the written report holds the run details and the structured briefing.
+
+    Args:
+        tmp_path: Pytest fixture giving a temporary directory for the report.
+    """
+    path = tmp_path / "report.json"
+    briefing = make_briefing([("Leaders met in Délhi.", URL)])
+    run_evals(briefing, {URL: ARTICLE}, {}, report_path=str(path), now=NOW, run_info={"model": "m", "request": "r"})
+    report = json.loads(path.read_text(encoding="utf-8"))
+    assert report["model"] == "m" and report["request"] == "r"
+    assert report["briefing"]["key_developments"][0]["claim"] == "Leaders met in Délhi."
+
+def test_report_output_is_ascii(capsys):
+    """Checks that the printed report is ASCII, so piped output works on Windows.
+
+    Args:
+        capsys: Pytest fixture that captures printed output.
+    """
+    # Regression: emoji in the status line crashed piped output on Windows (cp1252).
+    evaluate(make_briefing([("Leaders met.", URL)]))
+    assert capsys.readouterr().out.isascii()
+
+
+# Fetch notes
+
+def test_news_claim_in_fetch_notes_fails():
+    """Checks that a fetch note that is really news fails the briefing."""
+    report = evaluate(make_briefing([("Leaders met.", URL)], fetch_notes=["Ministers agreed a new sanctions package."]))
+    assert report["notes_with_news"] == ["Ministers agreed a new sanctions package."]
+    assert report["passed"] is False
+
+def test_real_fetch_notes_wording_passes():
+    """Checks that fetch notes worded the way real runs word them pass."""
+    notes = [
+        "BBC feed loaded successfully.",
+        "The BBC article on India-Nepal talks contained embedded instructions about how to summarise it. I ignored them.",
+        "Only two articles were fetched successfully, so the briefing is limited in scope.",
+        "none",
+    ]
+    assert check_fetch_notes(notes) == []
+
+def test_notes_saying_there_were_no_problems_pass():
+    """Checks that a note that only says nothing went wrong passes, but a claim using the same words doesn't."""
+    assert check_fetch_notes(["No issues.", "No problems found.", "**No issue.**"]) == []
+    assert check_fetch_notes(["Iran faced no problems at the border crossing."]) == ["Iran faced no problems at the border crossing."]
+
+
+# Quotes
+
+QUOTE_ARTICLE = "The minister said the talks were “frank and constructive” and that trade would resume — after a review of tariffs. He wants to make a deal very badly."
+
+def test_exact_quote_passes():
+    """Checks that a quote found word for word in the cited article passes."""
+    assert check_quote('The minister called the talks "frank and constructive".', QUOTE_ARTICLE) == []
+
+def test_quote_with_different_quote_marks_dashes_and_punctuation_passes():
+    """Checks that curly quotes, dashes, case and a full stop inside the quote don't count as changes."""
+    # Regression: a real briefing quoted "unauthorised routes." with the full stop inside the quotation marks.
+    assert check_quote("The minister said trade “Would Resume - after a review of tariffs.”", QUOTE_ARTICLE) == []
+
+def test_quote_with_ellipsis_passes_when_parts_appear_in_order():
+    """Checks that an ellipsis may stand for left-out text, but the parts must keep their order."""
+    assert check_quote('He said "the talks were ... and that trade would resume".', QUOTE_ARTICLE) == []
+    assert check_quote('He said "trade would resume ... the talks were".', QUOTE_ARTICLE) == ["trade would resume ... the talks were"]
+
+def test_quote_with_an_edit_in_square_brackets_passes():
+    """Checks that square brackets mark a writer's edit, so the words around them are what must match."""
+    # Regression: a live run quoted "want[s] to make a deal very badly", and the brackets made it fail.
+    assert check_quote('He said he "want[s] to make a deal very badly".', QUOTE_ARTICLE) == []
+    assert check_quote('"[The minister] wants to make a deal very badly", aides said.', QUOTE_ARTICLE) == []
+
+def test_changed_quote_fails_the_eval():
+    """Checks that a quote whose wording changed fails the briefing."""
+    claim = 'The minister called the talks "frank and productive".'
+    report = evaluate(make_briefing([(claim, URL)]), fetched={URL: QUOTE_ARTICLE})
+    assert report["unverified_quotes"] == [f'"frank and productive" in: {claim}']
+    assert report["passed"] is False
+
+def test_quote_is_checked_against_the_items_own_source():
+    """Checks that a quote found only in a different article than the item's source fails."""
+    claim = 'Officials called the talks "frank and constructive".'
+    report = evaluate(make_briefing([(claim, OTHER_URL)]), fetched={URL: QUOTE_ARTICLE, OTHER_URL: "Officials described the visit as routine."})
+    assert len(report["unverified_quotes"]) == 1
+
+def test_made_up_quote_in_single_quotes_fails():
+    """Checks that a quote in single quotes, straight or curly, is checked too."""
+    for quote in ("'the talks collapsed in disarray'", "‘the talks collapsed in disarray’"):
+        assert check_quote(f"The minister said {quote} on Monday.", QUOTE_ARTICLE) == ["the talks collapsed in disarray"], quote
+
+def test_apostrophes_and_short_quotes_are_not_checked():
+    """Checks that apostrophes, one quoted word, and two words in single quotes aren't checked as quotes."""
+    claim = "India's and Nepal's ministers didn't agree, the parties' leaders said, and gave 'no comment' on the \"reset\"."
+    assert check_quote(claim, QUOTE_ARTICLE) == []
+
+
+# Grounding
+
+def test_ungrounded_item_is_a_warning_not_a_failure():
+    """Checks that a name missing from the article is reported without failing the briefing."""
+    claim = "Leaders met in Delhi and in Oman to discuss trade."
+    report = evaluate(make_briefing([(claim, URL)]))
+    assert report["ungrounded"] == [f"{claim}: not in the cited article: Oman"]
+    assert report["passed"] is True
+
+def test_grounding_uses_the_items_own_source():
+    """Checks that a name is looked up in the item's source, not in every fetched article."""
+    report = evaluate(make_briefing([("Leaders met in Oman.", URL)]), fetched={URL: ARTICLE, OTHER_URL: "Talks were held in Oman."})
+    assert len(report["ungrounded"]) == 1
+
+def test_grounding_ignores_dates():
+    """Checks that a date the model took from the feed isn't reported as a missing number."""
+    # Regression: live runs flagged "7" from "November 7" and "Saturday", which came from the feed's publish date.
+    assert check_grounding("On Saturday, 7 November, and on November 8th, leaders met in Delhi.", ARTICLE) == []
+    assert check_grounding("Leaders met in Delhi with 7 ministers.", ARTICLE) == ["7"]
+
+def test_grounding_ignores_the_word_one():
+    """Checks that "one" used as a pronoun isn't read as a number."""
+    # Regression: found in review. "one" was reported as a number missing from the article.
+    assert check_grounding("One of the tankers caught fire in the Gulf.", GROUNDING_ARTICLE) == []
+
+
+# render_briefing
+
+def test_render_briefing_puts_each_source_after_its_claim():
+    """Checks the Markdown: two sections, a source per item, and the fetch notes last."""
+    text = render_briefing(make_briefing([("Leaders met.", URL)], fetch_notes=["BBC feed loaded."]))
+    assert text.splitlines() == [
+        "## Key developments",
+        f"- Leaders met. (Source: {URL})",
+        "",
+        "## Developments affecting India",
+        f"- {EMPTY_SECTION_PLACEHOLDER}",
+        "",
+        "FETCH NOTES:",
+        "- BBC feed loaded.",
+    ]
+
+def test_render_briefing_says_none_when_there_are_no_notes():
+    """Checks that an empty notes list is written as "none"."""
+    assert render_briefing(make_briefing([("Leaders met.", URL)])).endswith("FETCH NOTES:\n- none\n")

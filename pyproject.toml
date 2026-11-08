@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "geopolitical-briefing-agent"
+version = "0.1.0"
+description = "A LangGraph agent that writes a cited geopolitical news briefing and evaluates it on every run."
+readme = "README.md"
+license = "MIT"
+# The oldest version CI tests
+requires-python = ">=3.10"
+# requirements.txt stays the one list of runtime dependencies
+dynamic = ["dependencies"]
+
+[project.scripts]
+geopolitical-briefing = "geopolitical_news_agent:cli"
+
+[tool.setuptools]
+py-modules = ["geopolitical_news_agent", "evals", "briefing"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+# Python 3.10 is the oldest version CI tests, so rules that need newer syntax stay off.
+target-version = "py310"
+
+[tool.ruff.lint]
+# DOC rules are in preview. Only the ones named below are turned on, so other preview rules can't appear.
+preview = true
+explicit-preview-rules = true
+extend-select = [
+    "D",        # docstring style
+    "DOC102",   # documents an argument the function doesn't have
+    "DOC201",   # returns a value but has no Returns section
+    "DOC202",   # has a Returns section but returns nothing
+    "DOC402",   # yields but has no Yields section
+    "DOC403",   # has a Yields section but yields nothing
+    "DOC501",   # raises an exception that the Raises section doesn't list
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"

@@ -7,10 +7,11 @@ A LangChain / LangGraph tool-calling agent that reads allow-listed RSS feeds, fe
 and writes a source-cited geopolitical briefing, plus a deterministic evaluation module and tests:
 
 - `geopolitical_news_agent.py`: model, tools (`get_headlines`, `fetch_article`), LangGraph loop, entry point
-- `evals.py`: runtime eval checks (citations, uncited items, quotes, freshness, allowed sources, grounding)
+- `briefing.py`: the structure the model submits the briefing in (`SubmitBriefing`) and the Markdown renderer
+- `evals.py`: runtime eval checks on the submitted briefing (sources, quotes, fetch notes, freshness, allowed sources, grounding)
 - `tests/`: pytest suite for `evals.py`, the agent's tools and loop (with fakes), and docstrings
 - `injection_suite/`: prompt injection attacks run by hand against the live model (not part of CI)
-- `README.md`, `requirements.txt`, `requirements-dev.txt`, `ruff.toml`, `pytest.ini`, `.env.example`, `.gitignore`, `LICENSE`
+- `README.md`, `pyproject.toml`, `requirements.txt`, `requirements-dev.txt`, `.env.example`, `.gitignore`, `LICENSE`
 - `.github/`: this CI pipeline and prompt
 
 ## Hard rules
@@ -41,8 +42,9 @@ and writes a source-cited geopolitical briefing, plus a deterministic evaluation
 ## Dimensions to evaluate
 
 1. **Correctness & bugs**: logic errors, edge cases, regex behaviour in `URL_PATTERN`,
-   `normalize_url`, `check_uncited_items`, `check_freshness`, `check_allowed_sources`,
-   `check_grounding`; error handling in the tools and agent loop; the round limit.
+   `normalize_url`, `check_quote`, `check_fetch_notes`, `check_freshness`, `check_grounding`
+   and `run_evals`; error handling in the tools and agent loop; the round limit and the
+   fallback when the model answers without calling `SubmitBriefing`; per-run state in `RunState`.
 2. **Agent design**: system prompt quality and whether the code enforces its rules
    (the 5-article cap, the allowed feeds, retry-once). Look at tool docstrings, how
    tool output is shaped for the model, and whether `run_evals` is wired in.

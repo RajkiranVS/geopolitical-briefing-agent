@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+    # "labeled" lets the claude-review label ask for another Claude review
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
   workflow_dispatch:
 
 permissions:
@@ -11,14 +13,16 @@ permissions:
 
 # Actions are pinned to a commit, so a moved tag can't change what runs.
 
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  # Fast, deterministic checks. No API key needed.
+  # Fast, deterministic checks. No API key needed. They run on every push.
   tests:
     name: Tests (Python ${{ matrix.python-version }})
+    if: github.event.action != 'labeled'
+    # A new push cancels older tests of the same branch. Reviews have their own group, so a push
+    # never cancels a review that is still running.
+    concurrency:
+      group: tests-${{ github.ref }}-${{ matrix.python-version }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -44,7 +48,7 @@ jobs:
       - name: Byte-compile all modules
         run: python -m compileall -q .
 
-      # ruff is pinned in requirements-dev.txt, because ruff.toml uses preview rules that can change between releases.
+      # ruff is pinned in requirements-dev.txt, because its settings in pyproject.toml use preview rules that can change between releases.
       - name: Lint
         run: ruff check . --output-format=github
 
@@ -58,9 +62,21 @@ jobs:
     name: Claude project evaluation
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # Runs on pull requests and manual dispatch only (not on every push, to control API cost).
+    # Each review costs API credit, so it doesn't run on every push to a pull request. It runs when a
+    # pull request opens, reopens or leaves draft, when someone adds the claude-review label (remove
+    # and re-add it to review again), and on manual dispatch. Draft pull requests aren't reviewed.
     # Fork PRs never receive secrets, so skip instead of failing.
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       !github.event.pull_request.draft &&
+       (contains(fromJSON('["opened", "reopened", "ready_for_review"]'), github.event.action) ||
+        (github.event.action == 'labeled' && github.event.label.name == 'claude-review')))
+    # Asking for a new review replaces one still running for the same branch
+    concurrency:
+      group: review-${{ github.ref }}
+      cancel-in-progress: true
     permissions:
       contents: read
       pull-requests: write
@@ -94,7 +110,7 @@ jobs:
       - name: Install project and review tooling
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt pip-audit
+          pip install -r requirements-dev.txt
 
       # The project's own code runs here, in a step without the API key. Claude reads the saved output
       # instead of running the test suite itself. The pull request's diff and commits are saved here
@@ -105,10 +121,13 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
         run: |
           mkdir -p claude-review/checks
+          # The step shell stops at the first failing command, so each check's status is caught here.
+          # A failing check is a result for Claude to report, not a reason to stop the review.
           run_check() {
             name=$1; shift
-            "$@" > "claude-review/checks/$name.txt" 2>&1
-            echo "exit code: $?" >> "claude-review/checks/$name.txt"
+            status=0
+            "$@" > "claude-review/checks/$name.txt" 2>&1 || status=$?
+            echo "exit code: $status" >> "claude-review/checks/$name.txt"
           }
           run_check pytest python -m pytest -v
           run_check compileall python -m compileall -q .
