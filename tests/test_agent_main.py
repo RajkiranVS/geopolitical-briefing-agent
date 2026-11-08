@@ -1,6 +1,9 @@
 """Unit tests for how main() in geopolitical_news_agent.py reports the eval result."""
 
 import importlib
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
@@ -353,6 +356,90 @@ def test_fetch_article_rejects_error_status(tools, monkeypatch):
     set_fetch_response(monkeypatch, tools, fake_response(ARTICLE_URL, status=404))
     assert tools.fetch_article.invoke({"url": ARTICLE_URL}).startswith("FETCH_FAILED")
     assert tools.fetched == {}
+
+
+def allow_articles(monkeypatch, module, count: int, delay: float = 0.0, failing: tuple[str, ...] = ()) -> tuple[list[str], list[str]]:
+    """Makes several article links fetchable, with a fake download for each.
+
+    Args:
+        monkeypatch: Pytest fixture that replaces attributes for the length of the test.
+        module: The agent module.
+        count: How many article links to allow.
+        delay: Seconds each download takes, to make parallel calls overlap.
+        failing: URLs whose download returns an error status.
+
+    Returns:
+        A tuple (urls, requests): the allowed URLs, and a list that collects each requested URL.
+    """
+    urls = [f"https://www.bbc.com/news/world-{number}" for number in range(count)]
+    module.headline_links.update(urls)
+    requests = []
+    requests_lock = threading.Lock()
+
+    def fake_fetch_response(url, **kwargs):
+        """Records the request and returns the article, after the delay.
+
+        Args:
+            url: The URL requested.
+            **kwargs: Download options, which are ignored.
+
+        Returns:
+            A response for the article, with status 404 for a failing URL.
+        """
+        with requests_lock:
+            requests.append(url)
+        time.sleep(delay)
+        return SimpleNamespace(url=url, status=404 if url in failing else 200, html=ARTICLE_HTML)
+
+    monkeypatch.setattr(module, "fetch_response", fake_fetch_response)
+    return urls, requests
+
+
+def test_sixth_article_is_refused(tools, monkeypatch):
+    """Checks that a sixth article is refused without being downloaded.
+
+    Args:
+        tools: The agent module with its tool state reset and one article link allowed.
+        monkeypatch: Pytest fixture that replaces attributes for the length of the test.
+    """
+    # Regression: nothing tested the limit, the main rule the code enforces on the model.
+    urls, requests = allow_articles(monkeypatch, tools, 6)
+    results = [tools.fetch_article.invoke({"url": url}) for url in urls]
+    assert all("Article text." in result for result in results[:5])
+    assert results[5].startswith("FETCH_LIMIT_REACHED")
+    assert len(tools.fetched) == 5
+    assert len(requests) == 5
+
+
+def test_failed_fetch_does_not_use_up_the_limit(tools, monkeypatch):
+    """Checks that a failed download frees its place for another article.
+
+    Args:
+        tools: The agent module with its tool state reset and one article link allowed.
+        monkeypatch: Pytest fixture that replaces attributes for the length of the test.
+    """
+    urls, _ = allow_articles(monkeypatch, tools, 6, failing=("https://www.bbc.com/news/world-0",))
+    results = [tools.fetch_article.invoke({"url": url}) for url in urls]
+    assert results[0].startswith("FETCH_FAILED")
+    assert all("Article text." in result for result in results[1:])
+    assert len(tools.fetched) == 5
+
+
+def test_parallel_fetches_cannot_pass_the_limit(tools, monkeypatch):
+    """Checks that eight fetches at once download only five articles.
+
+    Args:
+        tools: The agent module with its tool state reset and one article link allowed.
+        monkeypatch: Pytest fixture that replaces attributes for the length of the test.
+    """
+    # Regression: the check and the record were separate, so parallel calls could all pass the check.
+    urls, requests = allow_articles(monkeypatch, tools, 8, delay=0.2)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda url: tools.fetch_article.invoke({"url": url}), urls))
+    assert len(requests) == 5
+    assert len(tools.fetched) == 5
+    assert sum(result.startswith("FETCH_LIMIT_REACHED") for result in results) == 3
+    assert tools.fetches_in_progress == set()
 
 
 def test_fetch_article_keeps_certificate_checks_on(tools, monkeypatch):
