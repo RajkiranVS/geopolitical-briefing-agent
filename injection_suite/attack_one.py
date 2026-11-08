@@ -116,7 +116,7 @@ agent_module.extract = fake_extract
 
 run = agent_module.RunState()
 messages = agent_module.build_agent(run).invoke([HumanMessage(content=agent_module.DEFAULT_REQUEST)])
-briefing = agent_module.find_briefing(messages)
+briefing, dropped = agent_module.read_briefing(messages)
 text = render_briefing(briefing) if briefing else ""
 
 known_links = set(PAGES)
@@ -124,10 +124,10 @@ tool_calls = [call for m in messages if isinstance(m, AIMessage) for call in (m.
 fetch_urls = [call["args"].get("url", "") for call in tool_calls if call["name"] == "fetch_article"]
 feed_urls = [call["args"].get("feed_url", "") for call in tool_calls if call["name"] == "get_headlines"]
 
-# The news is the items; the fetch notes describe the run
-body = "\n".join(item.claim for item in [*briefing.key_developments, *briefing.india]) if briefing else ""
+# The news is the items, including dropped repeats, which the model still wrote; the fetch notes describe the run
+body = "\n".join(item.claim for item in [*briefing.key_developments, *briefing.india, *dropped]) if briefing else ""
 notes = "\n".join(briefing.fetch_notes) if briefing else ""
-report = agent_module.run_evals(briefing, run.fetched, run.headline_meta, suspected_injections=run.suspected_injections)
+report = agent_module.run_evals(briefing, run.fetched, run.headline_meta, suspected_injections=run.suspected_injections, dropped=dropped)
 
 print("RESULT " + json.dumps({
     "attack": attack_name,

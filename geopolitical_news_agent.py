@@ -41,6 +41,7 @@ from evals import (
     WITHHELD_INJECTION_SIGNS,
     find_injection_signs,
     is_allowed_domain,
+    item_source,
     normalize_url,
     run_evals,
 )
@@ -581,12 +582,30 @@ def drop_india_repeats(briefing: SubmitBriefing) -> tuple[SubmitBriefing, list[B
     Returns:
         The briefing without the repeats, and the key developments that were dropped.
     """
-    india_sources = {normalize_url(item.source_url.strip()) for item in briefing.india}
-    india_sources.discard("")
+    # A source that isn't a link, such as "The Hindu", names no article, so it can't make a repeat
+    india_sources = {item_source(item) for item in briefing.india} - {""}
     kept, dropped = [], []
     for item in briefing.key_developments:
-        (dropped if normalize_url(item.source_url.strip()) in india_sources else kept).append(item)
+        (dropped if item_source(item) in india_sources else kept).append(item)
     return briefing.model_copy(update={"key_developments": kept}), dropped
+
+def read_briefing(messages: Sequence[BaseMessage]) -> tuple[SubmitBriefing | None, list[BriefingItem]]:
+    """Reads the submitted briefing and drops key developments that repeat an India item.
+
+    Args:
+        messages: The conversation the agent returned.
+
+    Returns:
+        The briefing to show, or None if none was submitted, and the key developments dropped from it.
+    """
+    briefing = find_briefing(messages)
+    if briefing is None:
+        return None, []
+    briefing, dropped = drop_india_repeats(briefing)
+    for item in dropped:
+        # Logged so it's visible how often the model ignores the one-section rule
+        logger.warning("Dropped a key development that repeats an India item from the same article: %s", item.source_url)
+    return briefing, dropped
 
 def build_agent(run: RunState, models: tuple | None = None):
     """Builds the agent for one run.
@@ -753,13 +772,7 @@ def main(argv: Sequence[str] = ()):
         print(f"The agent failed: {type(error).__name__}: {error}")
         messages = []
 
-    briefing = find_briefing(messages)
-    dropped: list[BriefingItem] = []
-    if briefing is not None:
-        briefing, dropped = drop_india_repeats(briefing)
-    for item in dropped:
-        # Logged so it's visible how often the model ignores the one-section rule
-        logger.warning("Dropped a key development that repeats an India item from the same article: %s", item.source_url)
+    briefing, dropped = read_briefing(messages)
     briefing_text = render_briefing(briefing) if briefing else ""
     print("--- BRIEFING ---")
     print(briefing_text)
@@ -778,12 +791,11 @@ def main(argv: Sequence[str] = ()):
         "request": args.request,
         "fetched_urls": sorted(run.fetched),
         "briefing_markdown": briefing_text,
-        "dropped_india_repeats": [item.model_dump() for item in dropped],
     }
     report = run_evals(
         briefing, run.fetched, run.headline_meta,
         report_path=str(args.report or report_path_for(started)),
-        suspected_injections=run.suspected_injections, run_info=run_info,
+        suspected_injections=run.suspected_injections, run_info=run_info, dropped=dropped,
     )
     if not report["passed"]:
         sys.exit(1)

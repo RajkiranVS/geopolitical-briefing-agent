@@ -195,9 +195,9 @@ A briefing **passes** only if all of these are true:
 
 Stale stories, unknown dates, items that name things their article doesn't (`ungrounded`), India items that never mention India (`india_off_topic`), repeated items (`repeated_items`), fetch notes that name no failure (`notes_without_failure`) and a briefing with fewer than 3 items, or fewer items than articles fetched if that is less (`too_few_items`), are reported as **warnings**. Stale stories don't fail a briefing because feeds keep important stories for days, so failing on age would fail correct briefings.
 
-`sources_by_site` counts the verified citations per site. It is not a check: a briefing that mostly cites one outlet isn't wrong, but it is worth seeing.
+`sources_by_site` counts the shown items whose source was fetched, per site, so three items from one article count three times. Subdomains count under their allowed domain, so `feeds.bbc.co.uk` is `bbc.co.uk`, but `bbc.com` and `bbc.co.uk` are still separate. It is not a check: a briefing that mostly cites one outlet isn't wrong, but it is worth seeing.
 
-Before the briefing is rendered or evaluated, a key development whose source link is also cited in the India section is dropped, so each story appears once. The dropped items are logged as warnings and listed in the report under `dropped_india_repeats`, to show how often the model ignores the one-section rule. Rendered source links leave out their query string, so tracking parameters such as `?at_medium=RSS` aren't shown; the evals compare links without them anyway.
+Before the briefing is rendered, a key development whose source link is also cited in the India section is dropped, so each story appears once. The dropped items are logged as warnings and listed in the report under `dropped_india_repeats`, to show how often the model ignores the one-section rule. They are still evaluated, so a made-up quote or an off-list link in a dropped item still fails the briefing. Only sources that are links can match: an empty or plain-text source never makes a repeat. Rendered source links leave out their query string, so tracking parameters such as `?at_medium=RSS` aren't shown; the evals compare links without them anyway.
 
 When the eval fails, the agent script exits with code 1.
 

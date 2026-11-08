@@ -1954,11 +1954,13 @@ def test_items_without_a_source_are_not_dropped_as_repeats(agent_module):
     """
     from briefing import BriefingItem, SubmitBriefing
 
-    briefing = SubmitBriefing(
-        key_developments=[BriefingItem(claim="Talks were held.", source_url="")],
-        india=[BriefingItem(claim="Leaders met in Delhi.", source_url="")],
-        fetch_notes=[],
-    )
-    kept, dropped = agent_module.drop_india_repeats(briefing)
-    assert len(kept.key_developments) == 1
-    assert dropped == []
+    # Regression: found in review. Plain-text sources such as "The Hindu" matched each other.
+    for source in ("", "The Hindu"):
+        briefing = SubmitBriefing(
+            key_developments=[BriefingItem(claim="Talks were held.", source_url=source)],
+            india=[BriefingItem(claim="Leaders met in Delhi.", source_url=source)],
+            fetch_notes=[],
+        )
+        kept, dropped = agent_module.drop_india_repeats(briefing)
+        assert len(kept.key_developments) == 1
+        assert dropped == []

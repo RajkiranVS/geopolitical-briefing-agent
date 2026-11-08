@@ -572,12 +572,26 @@ def test_display_url_leaves_text_that_isnt_a_link_alone():
     assert display_url("http://[bad") == "http://[bad"
 
 
-def test_sources_by_site_counts_verified_citations():
-    """Checks the per-site count, which is reported without affecting the result."""
-    fetched = {URL: ARTICLE, OTHER_URL: ARTICLE}
-    report = evaluate(make_briefing([("Leaders met in Delhi.", URL), ("Leaders met in Delhi.", OTHER_URL)]), fetched=fetched)
-    assert report["sources_by_site"] == {"bbc.com": 1, "thehindu.com": 1}
+def test_sources_by_site_counts_items_not_unique_links():
+    """Checks the per-site count: per shown item, with subdomains under their site, without affecting the result."""
+    # Regression: found in review. Counting unique links showed three items from one article as 1.
+    feeds_url = "https://feeds.bbc.co.uk/news/world-9"
+    fetched = {URL: ARTICLE, OTHER_URL: ARTICLE, feeds_url: ARTICLE}
+    briefing = make_briefing([("Leaders met in Delhi.", OTHER_URL), ("Leaders met in Delhi.", OTHER_URL), ("Leaders met in Delhi.", URL)],
+                             india=[("Leaders met in Delhi.", feeds_url)])
+    report = evaluate(briefing, fetched=fetched)
+    assert report["sources_by_site"] == {"thehindu.com": 2, "bbc.com": 1, "bbc.co.uk": 1}
     assert report["passed"] is True
+
+
+def test_dropped_items_are_still_checked():
+    """Checks that a dropped repeat with a made-up quote still fails the briefing."""
+    # Regression: found in review. Dropping an item before the evals hid its problems.
+    dropped = [BriefingItem(claim='Officials said "the talks are over".', source_url=URL)]
+    report = evaluate(make_briefing(india=[("Leaders met in Delhi.", URL)]), dropped=dropped)
+    assert report["unverified_quotes"]
+    assert report["passed"] is False
+    assert report["dropped_india_repeats"] == [item.model_dump() for item in dropped]
 
 
 # India section
