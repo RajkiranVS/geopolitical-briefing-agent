@@ -109,7 +109,7 @@ The agent is built with the LangGraph **Functional API** (`@entrypoint` and `@ta
 | Tool | Purpose | Behaviour |
 |------|---------|-----------|
 | `get_headlines(feed_url)` | Discover stories | Refuses anything except the exact URLs in `ALLOWED_FEEDS` before fetching, downloads the feed with the same protected client as articles (30 seconds per read and up to 3 attempts, so about 2 minutes if the server stops responding), and discards a feed that redirected off the allowlist. Parses the RSS feed with `feedparser` and returns up to **15** numbered items (title, published date, link, summary). Records each `link → published` date in `headline_meta` (normalised URL as key) for the freshness check. Returns `FETCH_FAILED: <url>` if the feed is empty. |
-| `fetch_article(url)` | Read a story | Refuses non-allowlisted URLs, then refuses once **5** articles have been fetched or **10** downloads have failed (`FETCH_LIMIT_REACHED`), and refuses a link already tried twice. Otherwise downloads the page with `trafilatura`, with certificate checks always on and its protection against private addresses. It discards a page that redirected off the allowlist, then extracts the article body, truncates it at a `Published -` footer if present, caps it at **4,000 characters**, records exactly that text in `fetched` and returns it with `Source: <url>`. Failed fetches return `FETCH_FAILED: <url>` and don't count toward the limit. |
+| `fetch_article(url)` | Read a story | Refuses non-allowlisted URLs, then refuses once **5** articles have been fetched or **10** downloads have failed (`FETCH_LIMIT_REACHED`), and refuses a link already tried twice. It downloads the link exactly as the feed gave it, not the URL the model wrote, so the model can't add a query string that carries data to the site. Otherwise downloads the page with `trafilatura`, with certificate checks always on and its protection against private addresses. It discards a page that redirected off the allowlist, then extracts the article body, truncates it at a `Published -` footer if present, caps it at **4,000 characters**, records exactly that text in `fetched` and returns it with `Source: <url>`. Failed fetches return `FETCH_FAILED: <url>` and don't count toward the limit. |
 
 ### News Sources
 
@@ -151,7 +151,7 @@ The system prompt asks for this format:
 
 A briefing **passes** only if all of these are true:
 
-- at least one citation was verified (`verified_count` is above 0), so an empty, prose-only or refused briefing fails,
+- at least one citation was verified (`verified_count` is above 0), so an empty, prose-only or refused briefing fails. Only links in the news count: a link in the final `FETCH NOTES:` section neither verifies a briefing nor fails it. `http` and `https` links to the same page match,
 - every cited URL was actually fetched (`unverified` is empty),
 - every bullet item and prose paragraph carries a citation (`uncited_items` is empty), **and**
 - every quote appears word for word in an article its item cites (`unverified_quotes` is empty).
@@ -320,7 +320,7 @@ The docstrings of `get_headlines` and `fetch_article` are also the tool descript
 
 Claude can use `Read`, `Glob`, `Grep` and `TodoWrite`, can write files only inside `claude-review/`, and has a Bash allow-list for running its probe tests, `pip list` and `pip show`, read-only git commands, `ls` and `wc`. Web access is blocked. Claude is told not to run the agent script, because that would make live API and network calls.
 
-The project's tests never run in the step that has the API key. Probe tests do, because Claude writes them during its run, but only through `env -u ANTHROPIC_API_KEY`, which keeps the key out of their environment. That stops accidental exposure, such as a test that prints its environment, not a test written to steal the key, which could still read it from the parent process. The job only runs for branches in this repository, so writing such a test needs write access. The Claude Code CLI and every action are pinned, the actions to a commit.
+Checkout doesn't save the job's token in `.git/config`, so neither the project's code nor Claude can read it from there. The project's tests never run in the step that has the API key. Probe tests do, because Claude writes them during its run, but only through `env -u ANTHROPIC_API_KEY`, which keeps the key out of their environment. That stops accidental exposure, such as a test that prints its environment, not a test written to steal the key, which could still read it from the parent process. The job only runs for branches in this repository, so writing such a test needs write access. The Claude Code CLI and every action are pinned, the actions to a commit.
 
 The report goes to the job summary and is posted as a comment on PRs (the comment is updated on each run). It is also uploaded as the `claude-evaluation` artifact, with `report.md`, `verdict.json` and the raw CLI output, which includes turn count and cost.
 

@@ -96,6 +96,19 @@ def test_curly_quotes_not_captured():
         "https://www.bbc.com/news/world-456",
     ]
 
+def test_table_pipe_not_captured():
+    """Checks that a table's cell border isn't captured as part of a URL."""
+    # Regression: found in review. The pipe made a correct citation count as never fetched.
+    assert extract_citations("| Leaders met | https://www.bbc.com/news/world-123|") == ["https://www.bbc.com/news/world-123"]
+
+def test_http_and_https_citations_match():
+    """Checks that citing the http form of an article fetched over https still verifies."""
+    # Regression: found in review. The scheme had to match, so a correct briefing failed.
+    briefing = "## Asia\n- Leaders met. Source: http://www.bbc.com/news/world-123\n"
+    report = run_evals(briefing, {"https://www.bbc.com/news/world-123": "Leaders met."}, {}, report_path=None, now=NOW)
+    assert report["unverified"] == []
+    assert report["verified_count"] == 1
+
 def test_url_as_markdown_link_text_is_one_citation():
     """Checks that a Markdown link whose text is its own URL counts once."""
     briefing = "[https://www.bbc.com/news/world-123](https://www.bbc.com/news/world-123)"
@@ -668,6 +681,27 @@ def test_unverified_citation_fails_alongside_verified_one():
     report = run_evals(briefing, fetched, headline_meta, report_path=None, now=NOW)
     assert report["verified_count"] == 1
     assert report["passed"] is False
+
+def test_briefing_with_no_news_fails_even_with_a_link_in_the_notes():
+    """Checks that a link in the fetch notes doesn't count as a citation."""
+    # Regression: found in review. A fetched article's link in the notes let a briefing with no news pass.
+    url = "https://www.bbc.com/news/world-123"
+    briefing = (
+        f"## Key developments\n- {EMPTY_SECTION_PLACEHOLDER}\n\n"
+        f"FETCH NOTES:\n- The BBC article ({url}) was fetched.\n"
+    )
+    report = run_evals(briefing, {url: "Article text."}, {}, report_path=None, now=NOW)
+    assert report["verified_count"] == 0
+    assert report["passed"] is False
+
+def test_failed_article_named_in_the_notes_does_not_fail_the_briefing():
+    """Checks that the notes may name the link of an article that failed to download."""
+    # Regression: found in review. That link counted as cited but never fetched.
+    _, briefing, fetched, headline_meta = clean_inputs()
+    briefing += "\nFETCH NOTES:\n- The Google News article https://news.google.com/rss/articles/CBMiabc could not be fetched.\n"
+    report = run_evals(briefing, fetched, headline_meta, report_path=None, now=NOW)
+    assert report["unverified"] == []
+    assert report["passed"] is True
 
 def test_uncited_prose_fails_alongside_verified_bullet():
     """Checks that an uncited paragraph fails a briefing that has a verified bullet."""

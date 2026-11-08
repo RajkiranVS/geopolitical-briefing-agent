@@ -8,10 +8,10 @@ from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 #Global Patterns
-# '*', backticks, square brackets, and double or curly quotes are never part of a URL (Markdown
-# and prose wrappers). '_' and '!' can appear inside URLs, so they are only rejected
-# as the final character.
-URL_PATTERN = r'https?://[^\s()<>*`\[\]"“”‘’]+[^\s()<>.,:;\'"\?!*_`\[\]“”‘’]'
+# '*', backticks, square brackets, pipes and double or curly quotes are never part of a URL
+# (Markdown, table and prose wrappers). '_' and '!' can appear inside URLs, so they are only
+# rejected as the final character.
+URL_PATTERN = r'https?://[^\s()<>*`|\[\]"“”‘’]+[^\s()<>.,:;\'"\?!*_`|\[\]“”‘’]'
 
 # The prompt tells the agent to put feed/fetch problems after this line.
 # Everything after it describes the run, not the news, so it needs no citation.
@@ -127,6 +127,8 @@ def looks_encoded(url: str) -> bool:
 def normalize_url(url: str) -> str:
     """Strips the query string, fragment and trailing slashes, and lowercases the scheme and host.
 
+    http and https give the same result, because the same article is often linked both ways.
+
     Args:
         url: The URL to normalize.
 
@@ -143,7 +145,10 @@ def normalize_url(url: str) -> str:
         # A malformed URL can't match a fetched one, so it is reported as unverified
         return url
     # Reconstruct url without query and fragment
-    normalized = f"{split_url.scheme.lower()}://{split_url.netloc.lower()}{split_url.path}"
+    scheme = split_url.scheme.lower()
+    if scheme == "http":
+        scheme = "https"
+    normalized = f"{scheme}://{split_url.netloc.lower()}{split_url.path}"
     # Remove trailing slashes
     normalized = normalized.rstrip("/")
     return normalized
@@ -550,7 +555,9 @@ def run_evals(briefing: str, fetched: dict[str, str], headline_meta: dict[str, s
     Raises:
         OSError: If the report file can't be written.
     """
-    cited_urls = extract_citations(briefing)
+    # Only the news counts as citing. A link in the fetch notes describes the run, so it neither
+    # proves a briefing reported anything nor fails one for naming an article that didn't download.
+    cited_urls = extract_citations(strip_fetch_notes(briefing))
     verified, unverified = check_cited_were_fetched(cited_urls, fetched)
     uncited_items = check_uncited_items(briefing)
     unverified_quotes = check_quotes(briefing, fetched)
