@@ -30,14 +30,13 @@ LIST_ITEM_START = re.compile(r'^([-*•]|\d+\.)\s+')
 # Lines that only label what follows. Markup labels are a Markdown heading, a bold title with an
 # optional bracketed note, as in "**Today's briefing** (feeds dated 5 Nov)", or a rule.
 MARKUP_LABEL_LINE = re.compile(r"^(#{1,6}\s.*|\*\*[^*\n]+\*\*\s*(\([^()\n]*\))?\s*:?|[-*_=]{3,})$")
-# Text labels are a line of up to 120 characters ending in a colon ("Key developments:"), an
-# intro with no numbers ("Here is today's briefing.") or a short line in capitals. They only count
-# between items, because inside a bullet the same line is a wrapped continuation. "Source:" is
-# never a label: it belongs to the item before it.
-TEXT_LABEL_LINE = re.compile(
-    r"^((?!(?i:\(?sources?\b))[^\n]{1,120}:"
-    r"|(?i:here is|here's|below is|this is|this briefing)\b[^\d\n]{0,100}|[A-Z0-9 &'’,/()-]{3,60})$"
-)
+# Text labels are an intro with no numbers ("Here is today's briefing.") or a short line in capitals.
+# They only count between items, because inside a bullet the same line is a wrapped continuation.
+TEXT_LABEL_LINE = re.compile(r"^((?i:here is|here's|below is|this is|this briefing)\b[^\d\n]{0,100}|[A-Z0-9 &'’,/()-]{3,60})$")
+# A line of up to 120 characters ending in a colon ("Key developments:") is a label only when content
+# follows it, so a claim such as "Iran seized three tankers, Reuters said:" can't pass as one.
+# "Source:" is never a label: it belongs to the item before it.
+COLON_LABEL_LINE = re.compile(r"^(?!(?i:\(?sources?\b))[^\n]{1,120}:$")
 # A paragraph that is only a citation, as in "Source: https://...", belongs to the item before it.
 # It must hold nothing but the label and one link, so it can't carry a claim of its own.
 SOURCE_LINE = re.compile(r'^\(?\s*sources?\s*:\s*(\[[^\]\n]{1,40}\]\()?https?://\S+\s*$', re.IGNORECASE)
@@ -49,6 +48,23 @@ FETCH_PROBLEM_WORDS = re.compile(
     r'summari[sz]\w*|items?|loaded|retrieved|retry|retried|withheld|none)\b',
     re.IGNORECASE,
 )
+# Numbers for the grounding check: digits with optional thousands separators and decimals.
+GROUNDING_NUMBER = re.compile(r"\b\d{1,3}(?:,\d{3})+(?:\.\d+)?\b|\b\d+(?:\.\d+)?\b")
+NUMBER_WORDS = {
+    word: str(value) for value, word in enumerate([
+        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+        "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen",
+        "nineteen", "twenty",
+    ])
+} | {"thirty": "30", "forty": "40", "fifty": "50", "sixty": "60", "seventy": "70", "eighty": "80", "ninety": "90"}
+# Capitalised words that aren't facts about the story: labels, the outlets the briefing cites, and
+# common words that are only capitalised because they start a sentence.
+GROUNDING_IGNORED_WORDS = {
+    "source", "bbc", "hindu", "google", "new", "according", "key", "development",
+    "the", "this", "that", "these", "those", "its", "it", "he", "she", "they", "we", "his", "her", "their",
+    "per", "in", "on", "at", "as", "an", "and", "but", "also", "while", "after", "before", "however",
+    "for", "from", "with", "by", "of", "to", "no", "not", "both", "all", "some", "other", "there",
+}
 # A quote on one line, in double quotes (groups 1 and 2) or single quotes (groups 3 and 4), straight
 # or curly. A single quote mark only opens a quote after a non-letter and only closes one before a
 # non-letter, so the apostrophes in "don't" and "India's" aren't read as quote marks.
@@ -203,7 +219,7 @@ def only_describes_fetch_problems(notes: str) -> bool:
     """
     for line in notes.splitlines():
         stripped = line.strip()
-        if not stripped or MARKUP_LABEL_LINE.match(stripped) or TEXT_LABEL_LINE.match(stripped):
+        if not stripped or MARKUP_LABEL_LINE.match(stripped) or TEXT_LABEL_LINE.match(stripped) or COLON_LABEL_LINE.match(stripped):
             continue
         line_text = LIST_ITEM_START.sub('', stripped)
         if not FETCH_PROBLEM_WORDS.search(line_text) and not NO_PROBLEMS_LINE.fullmatch(line_text.strip(' *_.!')):
@@ -242,6 +258,30 @@ def strip_fetch_notes(briefing: str) -> str:
         return briefing
     return briefing[:last_marker.start()]
 
+def introduces_content(following: list[str]) -> bool:
+    """Checks whether the next non-blank line is content a label could introduce.
+
+    Args:
+        following: The lines after the label.
+
+    Returns:
+        True if the next non-blank line is a list item or ordinary text, False if there is none
+        or it is another heading, label or the fetch notes marker.
+    """
+    for line in following:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if LIST_ITEM_START.match(stripped):
+            return True
+        return not (
+            MARKUP_LABEL_LINE.match(stripped)
+            or TEXT_LABEL_LINE.match(stripped)
+            or COLON_LABEL_LINE.match(stripped)
+            or is_notes_marker_line(stripped)
+        )
+    return False
+
 def split_items(briefing: str, labels: list[str] | None = None) -> list[str]:
     """Splits the briefing into list items and prose paragraphs, each joined onto one line.
 
@@ -267,7 +307,7 @@ def split_items(briefing: str, labels: list[str] | None = None) -> list[str]:
     # A citation paragraph may only join the item just before it, with nothing but blank lines between
     can_join_previous = False
     lines = strip_fetch_notes(briefing).splitlines()
-    for line in lines:
+    for number, line in enumerate(lines):
         stripped = line.strip()
 
         # 1. Check for bullet or numbered list indicators
@@ -288,7 +328,12 @@ def split_items(briefing: str, labels: list[str] | None = None) -> list[str]:
             current_item.append(stripped)
 
         # 4. Between items, labels and a marker line such as "FETCH NOTES: none" need no citation
-        elif MARKUP_LABEL_LINE.match(stripped) or TEXT_LABEL_LINE.match(stripped) or is_notes_marker_line(stripped):
+        elif (
+            MARKUP_LABEL_LINE.match(stripped)
+            or TEXT_LABEL_LINE.match(stripped)
+            or (COLON_LABEL_LINE.match(stripped) and introduces_content(lines[number + 1:]))
+            or is_notes_marker_line(stripped)
+        ):
             save_current()
             can_join_previous = False
             if labels is not None and not is_notes_marker_line(stripped):
@@ -510,30 +555,70 @@ def check_allowed_sources(cited: list[str], allowed_domains: Sequence[str]) -> l
     """
     return [url for url in cited if not is_allowed_domain(url, allowed_domains)]
 
-def check_grounding(item: str, article_text: str) -> list[str]:
-    """Extracts numbers and capitalised words from an item and looks for them in the source text.
+def grounding_numbers(text: str) -> set[str]:
+    """Finds the numbers in a text, with numbers written as words turned into digits.
 
     Args:
-        item: The text item to check for grounding.
-        article_text: The full text of the article to check against.
+        text: An item or an article.
 
     Returns:
-        A list of entities that are present in the item but missing from the article text.
+        Each number as digits, without thousands separators, such as "5000" for "5,000".
     """
-    if not article_text:
-        return ["Article text missing for comparison"]
-        
-    flagged_entities = []
-    # Extract numbers (e.g. 5,000, 19, 2026)
-    numbers = re.findall(r'\b\d+(?:,\d+)?\b', item)
-    # Extract Title Case Words (excluding line starting constructs)
-    capitalized = re.findall(r'\b[A-Z][a-zA-Z]+\b', item)
-    
-    for entity in set(numbers + capitalized):
-        if entity not in article_text:
-            flagged_entities.append(entity)
-            
-    return flagged_entities
+    numbers = {match.replace(",", "") for match in GROUNDING_NUMBER.findall(text)}
+    numbers.update(NUMBER_WORDS[word] for word in re.findall(r"[a-z]+", text.lower()) if word in NUMBER_WORDS)
+    return numbers
+
+def check_grounding(item: str, article_text: str) -> list[str]:
+    """Finds the numbers and names in an item that its article doesn't contain.
+
+    Names are words that start with a capital, matched in any case and with any ending, so
+    "Ministers" matches "minister". Numbers match whether written in digits or, up to twenty
+    and in tens, in words. Links and source names are ignored.
+
+    Args:
+        item: One item or paragraph of the briefing.
+        article_text: The text of an article the item cites.
+
+    Returns:
+        The numbers and names missing from the article; empty if all are there.
+    """
+    text = URL_IN_TEXT.sub(" ", item)
+    article = normalize_quote_text(article_text)
+    missing = sorted(grounding_numbers(text) - grounding_numbers(article))
+    for word in dict.fromkeys(re.findall(r"\b[A-Z][A-Za-z]+\b", text)):
+        # Number words are already compared as numbers
+        if word.lower() in GROUNDING_IGNORED_WORDS or word.lower() in NUMBER_WORDS:
+            continue
+        stem = re.sub(r"(['’]s|s)$", "", word.lower())
+        if stem in GROUNDING_IGNORED_WORDS or len(stem) < 3:
+            continue
+        if not re.search(rf"\b{re.escape(stem)}", article):
+            missing.append(word)
+    return missing
+
+def check_items_grounded(briefing: str, fetched: dict[str, str]) -> list[str]:
+    """Flags items whose numbers or names don't appear in any article they cite.
+
+    This is a warning, not a pass or fail rule: a correct item can name something its
+    article spells differently. Items that cite no fetched article are skipped.
+
+    Args:
+        briefing: The text briefing content.
+        fetched: Dict of {url: article_text} for the articles the model read.
+
+    Returns:
+        One entry per flagged item: the start of the item and what is missing.
+    """
+    articles = {normalize_url(url): text for url, text in fetched.items()}
+    flagged = []
+    for item in split_items(briefing):
+        cited = [articles[url] for url in extract_citations(item) if url in articles]
+        if not cited:
+            continue
+        missing = set.intersection(*(set(check_grounding(item, article)) for article in cited))
+        if missing:
+            flagged.append(f"{item[:80]}: not in the cited article: {', '.join(sorted(missing))}")
+    return flagged
 
 DEFAULT_ALLOWED_DOMAINS = ("bbc.co.uk", "bbci.co.uk", "bbc.com", "thehindu.com", "news.google.com")
 
@@ -561,6 +646,7 @@ def run_evals(briefing: str, fetched: dict[str, str], headline_meta: dict[str, s
     verified, unverified = check_cited_were_fetched(cited_urls, fetched)
     uncited_items = check_uncited_items(briefing)
     unverified_quotes = check_quotes(briefing, fetched)
+    ungrounded = check_items_grounded(briefing, fetched)
     stale, unknown_date = check_freshness(cited_urls, headline_meta, now=now)
     off_list = check_allowed_sources(cited_urls, allowed_domains)
 
@@ -572,6 +658,7 @@ def run_evals(briefing: str, fetched: dict[str, str], headline_meta: dict[str, s
         "unverified": unverified,
         "uncited_items": uncited_items,
         "unverified_quotes": unverified_quotes,
+        "ungrounded": ungrounded,
         "stale": stale,
         "unknown_date": unknown_date,
         "off_list": off_list,
@@ -591,6 +678,7 @@ def run_evals(briefing: str, fetched: dict[str, str], headline_meta: dict[str, s
     print(f"Cited but not read: {len(unverified)}")
     print(f"Uncited items and paragraphs: {len(uncited_items)}")
     print(f"Quotes not found in the cited article: {len(unverified_quotes)}")
+    print(f"Items naming things their article doesn't (warning): {len(ungrounded)}")
     print(f"Stale news warnings (>72h): {len(stale)}")
     print(f"Unknown publish date warnings: {len(unknown_date)}")
     print(f"Out of Bounds Domains: {len(off_list)}")
