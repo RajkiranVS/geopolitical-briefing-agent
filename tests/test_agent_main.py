@@ -21,6 +21,16 @@ from geopolitical_news_agent import ALLOWED_FEEDS
 
 ARTICLE_HTML = "<html><body><article><p>Article text.</p></article></body></html>"
 ARTICLE_URL = "https://www.bbc.com/news/world-123"
+# The repeat from the 8 November live run, worded as the model wrote it in each section
+HASINA_KEY = (
+    "Bangladesh's Law Minister Md Asaduzzaman said Dhaka has requested India extradite ousted Prime Minister "
+    "Sheikh Hasina under the extradition treaty, calling her a convicted criminal. India has acknowledged the "
+    "requests but has not announced a decision, and says they are being examined under its established processes."
+)
+HASINA_INDIA = (
+    "Bangladesh has formally asked India to extradite Sheikh Hasina, and India has not yet announced a decision "
+    "on the requests, which its Ministry of External Affairs says are being examined under established processes."
+)
 
 
 @pytest.fixture
@@ -1930,8 +1940,8 @@ def test_key_development_repeating_an_india_item_is_dropped(agent_module, monkey
     # Regression: the model put the Hasina extradition story in both sections, from one article
     other_url = "https://www.bbc.com/news/world-456"
     final = briefing_message(
-        [("Dhaka asked Delhi to extradite her.", f"{ARTICLE_URL}?at_medium=RSS"), ("Talks were held.", other_url)],
-        india=[("Dhaka asked India to extradite her.", ARTICLE_URL)],
+        [(HASINA_KEY, f"{ARTICLE_URL}?at_medium=RSS"), ("Talks were held.", other_url)],
+        india=[(HASINA_INDIA, ARTICLE_URL)],
     )
     set_agent(monkeypatch, agent_module, final, fetched_urls=(ARTICLE_URL, other_url))
     report_path = tmp_path / "report.json"
@@ -1939,9 +1949,9 @@ def test_key_development_repeating_an_india_item_is_dropped(agent_module, monkey
         agent_module.main(["--report", str(report_path)])
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert [item["source_url"] for item in report["briefing"]["key_developments"]] == [other_url]
-    assert [item["claim"] for item in report["briefing"]["india"]] == ["Dhaka asked India to extradite her."]
-    assert [item["claim"] for item in report["dropped_india_repeats"]] == ["Dhaka asked Delhi to extradite her."]
-    assert "Dhaka asked Delhi" not in report["briefing_markdown"]
+    assert [item["claim"] for item in report["briefing"]["india"]] == [HASINA_INDIA]
+    assert [item["claim"] for item in report["dropped_india_repeats"]] == [HASINA_KEY]
+    assert "Law Minister" not in report["briefing_markdown"]
     assert report["repeated_items"] == []
     assert "repeats an India item" in caplog.text
 
@@ -1964,3 +1974,22 @@ def test_items_without_a_source_are_not_dropped_as_repeats(agent_module):
         kept, dropped = agent_module.drop_india_repeats(briefing)
         assert len(kept.key_developments) == 1
         assert dropped == []
+
+
+def test_different_story_from_the_same_article_is_kept(agent_module):
+    """Checks that a key development citing an India item's article, but saying something else, stays.
+
+    Args:
+        agent_module: The agent module.
+    """
+    # Regression: found in review. One article can report two developments, so a shared link isn't a repeat.
+    from briefing import BriefingItem, SubmitBriefing
+
+    briefing = SubmitBriefing(
+        key_developments=[BriefingItem(claim="Delegates from forty countries held ceasefire talks in Geneva on Monday.", source_url=ARTICLE_URL)],
+        india=[BriefingItem(claim=HASINA_INDIA, source_url=ARTICLE_URL)],
+        fetch_notes=[],
+    )
+    kept, dropped = agent_module.drop_india_repeats(briefing)
+    assert len(kept.key_developments) == 1
+    assert dropped == []

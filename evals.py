@@ -292,6 +292,31 @@ def check_freshness(cited: list[str], headline_meta: dict[str, str], max_hours: 
             unknown_date_urls.append(url)
     return stale_urls, unknown_date_urls
 
+def repeat_words(claim: str) -> set[str]:
+    """Gives the words of a claim that count when comparing it with another.
+
+    Args:
+        claim: The claim.
+
+    Returns:
+        Its lowercased words, without common words.
+    """
+    return set(re.findall(r"[a-z0-9]+", claim.lower())) - REPEAT_IGNORED_WORDS
+
+def claims_repeat(first: set[str], second: set[str]) -> bool:
+    """Checks whether two claims, given as their repeat_words, say the same thing.
+
+    Args:
+        first: The words of one claim.
+        second: The words of the other.
+
+    Returns:
+        True if most of the words of the shorter claim are also in the other.
+    """
+    shorter = min(len(first), len(second))
+    # A very short item can have all its words in a longer one without being the same item
+    return shorter >= REPEAT_MIN_WORDS and len(first & second) / shorter >= REPEAT_OVERLAP
+
 def check_repeated_items(briefing: SubmitBriefing) -> list[str]:
     """Finds items that repeat another item, in the same section or across the two.
 
@@ -302,13 +327,11 @@ def check_repeated_items(briefing: SubmitBriefing) -> list[str]:
         One entry per repeated pair: the start of each claim.
     """
     items = [*briefing.key_developments, *briefing.india]
-    word_sets = [set(re.findall(r"[a-z0-9]+", item.claim.lower())) - REPEAT_IGNORED_WORDS for item in items]
+    word_sets = [repeat_words(item.claim) for item in items]
     repeated = []
     for first in range(len(items)):
         for second in range(first + 1, len(items)):
-            shorter = min(len(word_sets[first]), len(word_sets[second]))
-            # A very short item can have all its words in a longer one without being the same item
-            if shorter >= REPEAT_MIN_WORDS and len(word_sets[first] & word_sets[second]) / shorter >= REPEAT_OVERLAP:
+            if claims_repeat(word_sets[first], word_sets[second]):
                 repeated.append(f"{items[first].claim[:60]} | {items[second].claim[:60]}")
     return repeated
 
