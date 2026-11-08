@@ -95,6 +95,9 @@ SYSTEMPROMPT = f"""
 headline_meta: dict[str, str] = {}
 fetched: dict[str, str] = {}
 headline_links: set[str] = set()
+# Each feed link exactly as the feed gave it, keyed by its normalized form. fetch_article downloads
+# this, not the URL the model wrote, so the model can't add a query string that carries data.
+feed_links: dict[str, str] = {}
 suspected_injections: list[str] = []
 MAX_ARTICLES = 5
 # The prompt allows one retry per article. In 8 live runs at most 2 downloads failed, so 10 failures
@@ -222,6 +225,7 @@ def get_headlines(feed_url: str) -> str:
         published = entry.get('published')
         if link:
             headline_links.add(normalize_url(link))
+            feed_links[normalize_url(link)] = link
             if published:
                 headline_meta[normalize_url(link)] = published
 
@@ -256,6 +260,8 @@ def fetch_article(url: str) -> str:
     # Tool calls from one model turn run in parallel, so the check and the reservation happen
     # together under the lock. Otherwise six calls could all pass the check before any is recorded.
     key = normalize_url(url)
+    # The link as the feed gave it. A query string or other change the model made is dropped.
+    url = feed_links.get(key, key)
     with fetch_lock:
         # An article already read is sent again from memory, without another download
         if key in fetched:
@@ -450,6 +456,7 @@ def main():
     fetched.clear()
     headline_meta.clear()
     headline_links.clear()
+    feed_links.clear()
     suspected_injections.clear()
     fetch_attempts.clear()
     failed_fetches.clear()
@@ -479,9 +486,12 @@ def main():
     print("--- RAW BRIEFING TEXT EXTRACTED ---")
     print(briefing_text)
     print("-----------------------------------")
+    stop_reason = getattr(last_message, "response_metadata", {}).get("stop_reason") if last_message is not None else None
     if not briefing_text and last_message is not None:
-        stop_reason = getattr(last_message, "response_metadata", {}).get("stop_reason")
         print(f"The model returned no briefing (stop reason: {stop_reason}). Fetched content may have triggered a refusal.")
+    elif stop_reason not in (None, "end_turn"):
+        # The evals may still pass a briefing cut off before its last sections, so say so
+        print(f"The model stopped early (stop reason: {stop_reason}). The briefing may be incomplete.")
     report = run_evals(briefing_text, fetched, headline_meta, suspected_injections=suspected_injections)
     if not report["passed"]:
         sys.exit(1)

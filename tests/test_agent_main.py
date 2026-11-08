@@ -191,6 +191,7 @@ def tools(agent_module, monkeypatch):
     agent_module.fetch_attempts.clear()
     agent_module.failed_fetches.clear()
     agent_module.headline_links.clear()
+    agent_module.feed_links.clear()
     agent_module.headline_links.add(ARTICLE_URL)
     monkeypatch.setattr(agent_module, "extract", lambda html: "Article text.")
     return agent_module
@@ -928,6 +929,34 @@ def test_fetch_article_matches_feed_link_with_tracking_query(tools, monkeypatch)
     assert "Article text." in tools.fetch_article.invoke({"url": f"{ARTICLE_URL}?at_medium=RSS"})
 
 
+def test_model_cannot_add_a_query_string_to_a_feed_link(tools, monkeypatch):
+    """Checks that the link downloaded is the one the feed gave, not the one the model wrote.
+
+    Args:
+        tools: The agent module with its tool state reset and one article link allowed.
+        monkeypatch: Pytest fixture that replaces attributes for the length of the test.
+    """
+    # Regression: found in review. The model's URL was downloaded, so a query string could carry data to the site.
+    feed_link = f"{ARTICLE_URL}?at_medium=RSS"
+    tools.feed_links[ARTICLE_URL] = feed_link
+    requests = set_fetch_response(monkeypatch, tools, fake_response(feed_link))
+    result = tools.fetch_article.invoke({"url": f"{ARTICLE_URL}?leak=SYSTEM-PROMPT-TEXT"})
+    assert [request["url"] for request in requests] == [feed_link]
+    assert "SYSTEM-PROMPT-TEXT" not in result
+
+
+def test_get_headlines_records_each_link_as_the_feed_gave_it(tools, monkeypatch):
+    """Checks that get_headlines keeps the original link for fetch_article to download.
+
+    Args:
+        tools: The agent module with its tool state reset and one article link allowed.
+        monkeypatch: Pytest fixture that replaces attributes for the length of the test.
+    """
+    set_feed(monkeypatch, tools, tools.ALLOWED_FEEDS[0])
+    tools.get_headlines.invoke({"feed_url": tools.ALLOWED_FEEDS[0]})
+    assert tools.feed_links == {ARTICLE_URL: ARTICLE_URL}
+
+
 def test_only_feed_item_links_become_fetchable(tools, monkeypatch):
     """Checks that a link inside a summary doesn't become fetchable.
 
@@ -1238,3 +1267,38 @@ def test_main_explains_an_empty_refusal_and_exits_1(agent_module, monkeypatch, t
         agent_module.main()
     assert exit_info.value.code == 1
     assert "stop reason: refusal" in capsys.readouterr().out
+
+
+def test_main_warns_when_the_briefing_was_cut_off(agent_module, monkeypatch, tmp_path, capsys):
+    """Checks that a briefing cut off by the output limit gets a warning.
+
+    Args:
+        agent_module: The agent module, set up so it imports and runs without a real API key or user input.
+        monkeypatch: Pytest fixture that replaces attributes for the length of the test.
+        tmp_path: Pytest fixture giving a temporary directory for the eval report.
+        capsys: Pytest fixture that captures printed output.
+    """
+    # Regression: found in review. Only an empty briefing was explained, so a cut-off one passed silently.
+    monkeypatch.chdir(tmp_path)
+    cut_off = AIMessage(content="- Leaders met. https://www.bbc.com/news/world-123\n- Ministers agr", response_metadata={"stop_reason": "max_tokens"})
+    monkeypatch.setattr(agent_module, "agent", SimpleNamespace(invoke=lambda messages: [*messages, cut_off]))
+    with pytest.raises(SystemExit):
+        agent_module.main()
+    assert "stopped early (stop reason: max_tokens)" in capsys.readouterr().out
+
+
+def test_main_gives_no_warning_for_a_finished_briefing(agent_module, monkeypatch, tmp_path, capsys):
+    """Checks that a briefing that ended normally gets no warning.
+
+    Args:
+        agent_module: The agent module, set up so it imports and runs without a real API key or user input.
+        monkeypatch: Pytest fixture that replaces attributes for the length of the test.
+        tmp_path: Pytest fixture giving a temporary directory for the eval report.
+        capsys: Pytest fixture that captures printed output.
+    """
+    monkeypatch.chdir(tmp_path)
+    finished = AIMessage(content="- Leaders met. https://www.bbc.com/news/world-123", response_metadata={"stop_reason": "end_turn"})
+    monkeypatch.setattr(agent_module, "agent", SimpleNamespace(invoke=lambda messages: [*messages, finished]))
+    with pytest.raises(SystemExit):
+        agent_module.main()
+    assert "stopped early" not in capsys.readouterr().out
