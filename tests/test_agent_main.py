@@ -1084,7 +1084,8 @@ def test_final_model_must_submit_and_keeps_the_other_tools(agent_module):
     tool_model, final_model = agent_module.bind_models(FakeChatModel(), agent_module.make_tools(agent_module.RunState()))
     # The message history contains tool calls, so all the tools must stay defined.
     assert len(tool_model.tools) == len(final_model.tools) == 3
-    # The forced call can't come with other calls, which would never run; the tool model keeps parallel calls
+    # SubmitBriefing is forced with parallel calls off, so no other call, which would never run, can come
+    # with it. The tool model is neither forced nor limited, so fetches can still run in parallel.
     assert final_model.kwargs == {"tool_choice": "SubmitBriefing", "parallel_tool_calls": False}
     assert tool_model.kwargs == {}
 
@@ -1841,3 +1842,17 @@ def test_question_headline_after_an_also_read_label_is_removed(agent_module):
     trimmed = agent_module.trim_article("The talks resumed.\nAlso read:\nIs Iran ready for talks?\nThe ministers meet on Monday.")
     assert "Is Iran ready" not in trimmed and "Also read" not in trimmed
     assert "The ministers meet on Monday." in trimmed
+
+
+def test_headline_quoting_a_phrase_after_an_also_read_label_is_removed(agent_module):
+    """Checks that a headline ending in a quoted phrase goes with its label, while quoted speech stays.
+
+    Args:
+        agent_module: The agent module.
+    """
+    # Regression: found in review. Any line ending in a quote mark was kept, so these headlines stayed.
+    for headline in ("Iran rejects 'peace plan'", "Trump hails ‘historic deal’"):
+        trimmed = agent_module.trim_article(f"The talks resumed.\nAlso read:\n{headline}\nThe ministers meet on Monday.")
+        assert headline not in trimmed and "The ministers meet on Monday." in trimmed
+    for speech in ('“We will respond to this attack”', "The minister said: 'talks are over'"):
+        assert speech in agent_module.trim_article(f"The talks resumed.\nAlso read:\n{speech}")
