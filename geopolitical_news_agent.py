@@ -266,6 +266,9 @@ def fetch_article(url: str) -> str:
         # An article already read is sent again from memory, without another download
         if key in fetched:
             return article_result(url, fetched[key])
+        # Two calls for one link in the same turn would otherwise both download it
+        if key in fetches_in_progress:
+            return f"FETCH_FAILED: {url} is already being fetched by another call. Use that result."
         # Downloads still running may fail too, so they count, or parallel calls could overshoot
         if len(failed_fetches) + len(fetches_in_progress) >= MAX_FAILED_FETCHES:
             return f"FETCH_LIMIT_REACHED: {MAX_FAILED_FETCHES} fetches have failed. Write the briefing now using what you have."

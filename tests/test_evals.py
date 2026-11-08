@@ -820,6 +820,12 @@ def test_grounding_matches_abbreviations_written_with_stops_or_spelled_out():
     article = "The U.S. Navy fired. The United Nations and the Ministry of External Affairs responded."
     assert check_grounding("- The US Navy fired, and the UN and the MEA responded.", article) == []
 
+def test_initials_from_part_of_a_name_do_not_match():
+    """Checks that an abbreviation must spell out a whole name, not part of a longer one."""
+    # Regression: found in review. Every part of a run of capitalised words counted, so "UK" matched "Ugandan Kenyan Partnership".
+    article = "The Ugandan Kenyan Partnership met on Monday."
+    assert check_grounding("- UK officials met on Monday.", article) == ["UK"]
+
 def test_grounding_matches_numbers_written_differently():
     """Checks that compound number words and an article's "one" match digits in the item."""
     # Regression: found in review. "Twenty-five" was read as 20 and 5, and "1" didn't match "one".

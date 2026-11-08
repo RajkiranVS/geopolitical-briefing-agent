@@ -590,15 +590,19 @@ def spelled_out_initials(text: str) -> set[str]:
         text: An article, with its original capitals.
 
     Returns:
-        The initials of every run of two to six capitalised words, ignoring "of" and "the"
-        inside the run, so "Ministry of External Affairs" gives "MEA".
+        The initials of each whole run of two to six capitalised words, ignoring "of" and "the"
+        inside the run, so "Ministry of External Affairs" gives "MEA". A capitalised word that
+        only starts a sentence, such as "The" in "The United Nations", is dropped from the front.
+        Initials from part of a run don't count, so "Ugandan Kenyan Partnership" doesn't give "UK".
     """
     initials = set()
-    for run in re.findall(r"\b[A-Z][a-z]+(?:\s+(?:(?:of|the|and|for)\s+)*[A-Z][a-z]+){1,5}", text):
-        letters = "".join(word[0] for word in run.split() if word[0].isupper())
-        for start in range(len(letters)):
-            for end in range(start + 2, len(letters) + 1):
-                initials.add(letters[start:end])
+    # "and" usually joins two names, as in "the UN and the Ministry", so it ends a run
+    for run in re.findall(r"\b[A-Z][a-z]+(?:\s+(?:(?:of|the|for)\s+)*[A-Z][a-z]+){1,5}", text):
+        words = [word for word in run.split() if word[0].isupper()]
+        while words and words[0].lower() in GROUNDING_IGNORED_WORDS:
+            words = words[1:]
+        if len(words) >= 2:
+            initials.add("".join(word[0] for word in words))
     return initials
 
 def collapse_abbreviations(text: str) -> str:
