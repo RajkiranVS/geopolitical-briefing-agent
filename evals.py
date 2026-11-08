@@ -41,6 +41,7 @@ NO_PROBLEMS_NOTE = re.compile(r'no\s+(issues?|problems?|errors?)(\s+(to\s+report
 # Two items are the same item when most of the words of the shorter one are also in the other. In 26
 # live briefings no two items shared more than 23 per cent, so 60 per cent leaves a wide margin.
 REPEAT_OVERLAP = 0.6
+REPEAT_MIN_WORDS = 6
 REPEAT_IGNORED_WORDS = {
     "the", "a", "an", "of", "in", "on", "and", "to", "said", "says", "that", "for", "with", "at",
     "is", "was", "by", "its", "has", "from",
@@ -260,7 +261,8 @@ def check_repeated_items(briefing: SubmitBriefing) -> list[str]:
     for first in range(len(items)):
         for second in range(first + 1, len(items)):
             shorter = min(len(word_sets[first]), len(word_sets[second]))
-            if shorter and len(word_sets[first] & word_sets[second]) / shorter >= REPEAT_OVERLAP:
+            # A very short item can have all its words in a longer one without being the same item
+            if shorter >= REPEAT_MIN_WORDS and len(word_sets[first] & word_sets[second]) / shorter >= REPEAT_OVERLAP:
                 repeated.append(f"{items[first].claim[:60]} | {items[second].claim[:60]}")
     return repeated
 

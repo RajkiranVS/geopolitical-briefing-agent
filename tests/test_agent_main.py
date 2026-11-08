@@ -1734,3 +1734,43 @@ def test_hindu_footer_is_still_removed_and_the_cap_still_applies(agent_module):
     """
     assert agent_module.trim_article("Talks resumed.\nPublished - November 08, 2026 10:00 am IST\nTopics") == "Talks resumed."
     assert len(agent_module.trim_article("word " * 2000)) == agent_module.MAX_ARTICLE_CHARS
+
+
+def test_forced_submission_made_alongside_a_fetch_runs_the_fetch_first(agent_module, monkeypatch):
+    """Checks that a forced response that also fetches an article runs the fetch before the briefing counts.
+
+    Args:
+        agent_module: The agent module.
+        monkeypatch: Pytest fixture that replaces attributes for the length of the test.
+    """
+    # Regression: found in review. After the round limit or a text answer, the forced response was
+    # accepted at once, so a fetch made in it never ran.
+    monkeypatch.setattr(agent_module, "extract", lambda html: "Leaders met in Delhi.")
+    monkeypatch.setattr(agent_module, "fetch_response", lambda url, **kwargs: SimpleNamespace(url=url, status=200, html=ARTICLE_HTML))
+    run = agent_module.RunState()
+    run.headline_links.add(ARTICLE_URL)
+    fetch = {"name": "fetch_article", "args": {"url": ARTICLE_URL}, "id": "call_fetch", "type": "tool_call"}
+    forced_with_fetch = briefing_message([("Leaders met in Delhi.", ARTICLE_URL)])
+    forced_with_fetch.tool_calls.insert(0, fetch)
+    final_model = ScriptedModel([forced_with_fetch, briefing_message([("Leaders met in Delhi.", ARTICLE_URL)])])
+    tool_model = ScriptedModel([AIMessage(content="Here is the briefing in text.")])
+    messages = agent_module.build_agent(run, models=(tool_model, final_model)).invoke([HumanMessage(content="Brief me")])
+    assert ARTICLE_URL in run.fetched
+    assert len(final_model.calls) == 2
+    assert "Not accepted yet" in final_model.calls[1][-1].content
+    report = agent_module.run_evals(agent_module.find_briefing(messages), run.fetched, run.headline_meta)
+    assert report["passed"] is True
+
+
+def test_calls_made_with_a_malformed_briefing_in_a_forced_response_run(agent_module):
+    """Checks that other calls made in a forced response with a malformed briefing run, and the model submits again.
+
+    Args:
+        agent_module: The agent module.
+    """
+    final_model = ScriptedModel([malformed_briefing(other_calls=[FEED_CALL]), briefing_message([("Leaders met.", ARTICLE_URL)])])
+    agent = scripted_agent(agent_module, ScriptedModel([AIMessage(content="Here is the briefing in text.")]), final_model)
+    agent.invoke([HumanMessage(content="Brief me")])
+    results = {message.tool_call_id: message.content for message in final_model.calls[1][-2:]}
+    assert results["call_1"].startswith("FETCH_FAILED: https://example.com/feed is not an allowed feed")
+    assert results["call_bad"].startswith("Not accepted yet")

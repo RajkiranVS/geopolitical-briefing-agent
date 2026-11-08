@@ -593,3 +593,12 @@ def test_different_items_from_the_same_article_are_not_repeats():
         ("Officials said a separate agreement on hydropower exports will be signed next month.", URL),
     ]))
     assert report["repeated_items"] == []
+
+def test_short_item_inside_a_long_one_is_not_a_repeat():
+    """Checks that a very short item whose words all appear in a longer item isn't counted as a repeat."""
+    # Regression: found in review. Overlap is measured against the shorter item, so a short one scored 100 per cent.
+    report = evaluate(make_briefing([
+        ("Iran talks resumed.", URL),
+        ("Iran talks resumed in Geneva on Tuesday after a two-month pause, with both sides saying sanctions relief was on the table.", URL),
+    ]))
+    assert report["repeated_items"] == []

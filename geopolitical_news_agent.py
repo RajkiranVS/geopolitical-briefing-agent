@@ -83,6 +83,11 @@ MAX_ARTICLES = 5
 MAX_ATTEMPTS_PER_ARTICLE = 2
 MAX_FAILED_FETCHES = 10
 MAX_ROUNDS = 15
+# The reply to a SubmitBriefing call made in the same response as other tools
+EARLY_SUBMISSION = (
+    "Not accepted yet: SubmitBriefing was called in the same turn as other tools. "
+    "Read their results, then call SubmitBriefing again on its own."
+)
 
 # By default trafilatura retries without certificate checks after an SSL error.
 FETCH_CONFIG = use_config()
@@ -573,6 +578,25 @@ def build_agent(run: RunState, models: tuple | None = None):
             logger.exception("Tool %s failed", name)
             return tool_error(tool_call, f"FETCH_FAILED: {name} failed with {type(error).__name__}.")
 
+    def answer_calls(response: AIMessage, briefing_reply: str) -> list[ToolMessage]:
+        """Runs every call in a response except SubmitBriefing, which gets a reply instead.
+
+        The API needs a result for every call in a response, so none is left unanswered.
+
+        Args:
+            response: A model response that may call SubmitBriefing alongside other tools.
+            briefing_reply: What to tell the model about its SubmitBriefing call.
+
+        Returns:
+            One result per call, in the order of the calls.
+        """
+        submitted = briefing_call(response)
+        futures = [None if tool_call is submitted else call_tool(tool_call) for tool_call in response.tool_calls]
+        return [
+            tool_error(tool_call, briefing_reply) if future is None else future.result()
+            for tool_call, future in zip(response.tool_calls, futures)
+        ]
+
     @entrypoint()
     def agent(messages: list[BaseMessage]):
         """Runs the model and its tools until the model submits the briefing.
@@ -610,34 +634,23 @@ def build_agent(run: RunState, models: tuple | None = None):
                 break
 
             # A briefing submitted alongside other calls is sent back: the model submits again, on its
-            # own, once it has their results. The API needs a result for every call, in any case.
-            submitted = briefing_call(model_response)
-            early_submission = (
-                f"Not accepted yet: {BRIEFING_TOOL} was called in the same turn as other tools. "
-                f"Read their results, then call {BRIEFING_TOOL} again on its own."
-            )
-            tool_result_futures = [
-                None if tool_call is submitted else call_tool(tool_call) for tool_call in model_response.tool_calls
-            ]
-            tool_results = [
-                tool_error(tool_call, early_submission) if future is None else future.result()
-                for tool_call, future in zip(model_response.tool_calls, tool_result_futures)
-            ]
-            messages = cast(list[BaseMessage], add_messages(list(messages), [model_response, *tool_results]))
+            # own, once it has their results
+            messages = cast(list[BaseMessage], add_messages(list(messages), [model_response, *answer_calls(model_response, EARLY_SUBMISSION)]))
             model_response = call_llm(messages).result()
+
+        # A forced response can also come with other calls, such as a fetch for an article the
+        # briefing cites. They run, and the model must submit once more, so their results count.
+        if briefing_call(model_response) and len(model_response.tool_calls) > 1:
+            messages = cast(list[BaseMessage], add_messages(list(messages), [model_response, *answer_calls(model_response, EARLY_SUBMISSION)]))
+            model_response = call_llm(messages, must_submit=True).result()
 
         # A briefing that doesn't fit the schema would lose all the reading done so far, so the
         # model gets the errors and one more try. Only one, so a model that keeps failing can't loop.
         call = briefing_call(model_response)
         error = briefing_error(call) if call else None
         if call and error:
-            # The API needs a result for every call in the response, including any made alongside it
-            retry_results = [
-                tool_error(tool_call, f"{BRIEFING_TOOL} didn't fit the schema: {error} Call {BRIEFING_TOOL} again with valid fields."
-                           if tool_call is call else "Not run: the briefing was submitted in the same turn.")
-                for tool_call in model_response.tool_calls
-            ]
-            messages = cast(list[BaseMessage], add_messages(list(messages), [model_response, *retry_results]))
+            reply = f"{BRIEFING_TOOL} didn't fit the schema: {error} Call {BRIEFING_TOOL} again with valid fields."
+            messages = cast(list[BaseMessage], add_messages(list(messages), [model_response, *answer_calls(model_response, reply)]))
             model_response = call_llm(messages, must_submit=True).result()
         return cast(list[BaseMessage], add_messages(list(messages), model_response))
 
