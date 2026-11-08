@@ -49,8 +49,16 @@ FETCH_PROBLEM_WORDS = re.compile(
     r'summari[sz]\w*|items?|loaded|retrieved|retry|retried|withheld|none)\b',
     re.IGNORECASE,
 )
-# A quote in double quotes, straight or curly, on one line.
-QUOTE_PATTERN = re.compile(r'"([^"\n]{3,500})"|“([^”\n]{3,500})”')
+# A quote on one line, in double quotes (groups 1 and 2) or single quotes (groups 3 and 4), straight
+# or curly. A single quote mark only opens a quote after a non-letter and only closes one before a
+# non-letter, so the apostrophes in "don't" and "India's" aren't read as quote marks.
+QUOTE_PATTERN = re.compile(
+    r'"([^"\n]{3,500})"|“([^”\n]{3,500})”'
+    r"|(?<!\w)'(?=\S)([^\n]{3,500}?)(?<=\S)'(?!\w)|(?<!\w)‘(?=\S)([^\n]{3,500}?)(?<=\S)’(?!\w)"
+)
+# Single quotes are also used for scare quotes and names, so they only count from three words.
+MIN_WORDS_DOUBLE_QUOTE = 2
+MIN_WORDS_SINGLE_QUOTE = 3
 # Punctuation at either end of a quote, such as a full stop placed inside the quotation marks.
 QUOTE_EDGE_PUNCTUATION = " .,;:!?'"
 ELLIPSIS = re.compile(r'\[(?:\.\.\.|…)\]|\.\.\.|…')
@@ -229,7 +237,7 @@ def strip_fetch_notes(briefing: str) -> str:
         return briefing
     return briefing[:last_marker.start()]
 
-def split_items(briefing: str) -> list[str]:
+def split_items(briefing: str, labels: list[str] | None = None) -> list[str]:
     """Splits the briefing into list items and prose paragraphs, each joined onto one line.
 
     Items are grouped across line continuations. Headings, bold titles and horizontal rules
@@ -237,6 +245,7 @@ def split_items(briefing: str) -> list[str]:
 
     Args:
         briefing: The text briefing content.
+        labels: If given, the heading and label lines between items are added to it.
 
     Returns:
         The items and paragraphs, in order.
@@ -277,6 +286,8 @@ def split_items(briefing: str) -> list[str]:
         elif MARKUP_LABEL_LINE.match(stripped) or TEXT_LABEL_LINE.match(stripped) or is_notes_marker_line(stripped):
             save_current()
             can_join_previous = False
+            if labels is not None and not is_notes_marker_line(stripped):
+                labels.append(stripped)
 
         # 5. A citation in its own paragraph belongs to the item just before it
         elif can_join_previous and SOURCE_LINE.match(stripped):
@@ -345,9 +356,11 @@ def normalize_quote_text(text: str) -> str:
 def check_quotes(briefing: str, fetched: dict[str, str]) -> list[str]:
     """Flags quotes that don't appear word for word in an article their item cites.
 
-    Only quotes of two or more words are checked, because single quoted words are usually
-    labels or scare quotes. An ellipsis inside a quote may stand for left-out text. Items that
-    cite no fetched article are skipped, because the citation checks already fail them.
+    Quotes in double quotes count from two words, and quotes in single quotes from three,
+    because shorter ones are usually labels or scare quotes. An ellipsis inside a quote may
+    stand for left-out text. Items that cite no fetched article are skipped, because the
+    citation checks already fail them. Headings and label lines cite nothing, so their quotes
+    may come from any fetched article.
 
     Args:
         briefing: The text briefing content.
@@ -357,19 +370,37 @@ def check_quotes(briefing: str, fetched: dict[str, str]) -> list[str]:
         The quotes that weren't found, each with the start of its item.
     """
     articles = {normalize_url(url): normalize_quote_text(text) for url, text in fetched.items()}
+    labels: list[str] = []
+    items = split_items(briefing, labels)
     unverified = []
-    for item in split_items(briefing):
+    for item, is_label in [(item, False) for item in items] + [(label, True) for label in labels]:
         cited = [articles[url] for url in extract_citations(item) if url in articles]
+        if is_label and not cited:
+            cited = list(articles.values())
         if not cited:
             continue
-        for match in QUOTE_PATTERN.finditer(item):
-            quote = (match.group(1) or match.group(2)).strip(QUOTE_EDGE_PUNCTUATION)
-            if len(quote.split()) < 2:
-                continue
+        for quote in quotes_in(item):
             parts = [normalize_quote_text(part).strip(QUOTE_EDGE_PUNCTUATION) for part in ELLIPSIS.split(quote)]
             if not any(appears_in_order([part for part in parts if part], article) for article in cited):
                 unverified.append(f'"{quote}" in: {item[:80]}')
     return unverified
+
+def quotes_in(text: str) -> list[str]:
+    """Finds the quotes long enough to check in one item or line.
+
+    Args:
+        text: An item, paragraph or heading from the briefing.
+
+    Returns:
+        Each quote without its quotation marks or the punctuation at its ends.
+    """
+    quotes = []
+    for match in QUOTE_PATTERN.finditer(text):
+        double = match.group(1) or match.group(2)
+        quote = (double or match.group(3) or match.group(4)).strip(QUOTE_EDGE_PUNCTUATION)
+        if len(quote.split()) >= (MIN_WORDS_DOUBLE_QUOTE if double else MIN_WORDS_SINGLE_QUOTE):
+            quotes.append(quote)
+    return quotes
 
 def appears_in_order(parts: list[str], article: str) -> bool:
     """Checks that each part of a quote appears in the article, in order.
