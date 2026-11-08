@@ -4,6 +4,24 @@ A **LangGraph + Claude** agent that writes geopolitical news briefings citing **
 
 The agent reads live RSS feeds, fetches the full text of selected articles and submits a neutral, attributed briefing with a dedicated section on developments affecting India. It submits the briefing as structured data, so every item arrives with its source, and the Markdown is built in code. After every run, `evals.py` verifies that each item's source is an article the agent fetched, that quotes appear word for word in that article, that the fetch notes hold no news, and that every source is on the allowlist. Runs are traced in **LangSmith**, and the evals are covered by a `pytest` suite.
 
+**[Example run trace in LangSmith](https://apac.smith.langchain.com/public/945c919d-2ee1-4493-af33-a39e3ee7f901/r/01a197c5-131f-7140-8012-28330142dfb4?start_time=2026-11-01T15%3A40%3A37.535982Z)**: every model and tool call of one run, recorded on 1 November 2026 with an earlier version of the agent, before briefings were submitted as structured data.
+
+### Sample briefing
+
+An excerpt of a real run on 8 November 2026, which passed every eval: two of its four key developments, each shortened by a sentence, its India item, and the start of its fetch notes.
+
+> ## Key developments
+> - Israeli President Isaac Herzog has tasked opposition leader Gadi Eisenkot with forming a new government, giving him 28 days with a possible 14-day extension. Netanyahu's bloc won 53 of 120 Knesset seats and Eisenkot's bloc 48, while two Arab-led alliances won 19 seats and are potential kingmakers. (Source: https://www.bbc.co.uk/news/articles/cmy8367lj5xlo)
+> - The Houthis claimed six military operations against Saudi Arabia on Saturday, including strikes on Riyadh's King Khalid International Airport and Aramco facilities, as retaliation for Saudi strikes they said killed civilians in Taiz. Saudi Arabia did not immediately confirm the attacks. (Source: https://www.indiatvnews.com/news/world/houthis-claim-strikes-on-riyadh-airport-aramco-oil-facility-saudi-military-after-25-killed-in-yemen-strikes-2026-11-07-1058925)
+>
+> ## Developments affecting India
+> - Bangladesh's Law Minister Md Asaduzzaman said on Sunday that ousted PM Sheikh Hasina is a 'convicted criminal' and that Dhaka has requested India extradite her under the extradition treaty. India has acknowledged receiving the requests but has not announced a decision, and the Ministry of External Affairs says they are being examined through established processes. (Source: https://www.thehindu.com/news/international/bangladesh-law-minister-calls-hasina-convicted-criminal-says-extradition-request-sent-to-india/article71680798.ece)
+>
+> FETCH NOTES:
+> - The Hindu feed items were fetched for the Hormuz and Hasina stories; the BBC feed and India TV feed were used for the Krakow, Israel and Houthi stories.
+
+Each item's source is an article the agent fetched, which the evals check on every run. See [Sample Report](#sample-report) for the eval report from a run.
+
 ---
 
 ## Table of Contents
@@ -102,7 +120,7 @@ The agent is built with the LangGraph **Functional API** (`@entrypoint` and `@ta
 
 1. **`call_llm`**: sends the system prompt and message history to the model (`claude-haiku-5-5` unless `BRIEFING_MODEL` says otherwise), with `get_headlines`, `fetch_article` and `SubmitBriefing` bound to it.
 2. **`call_tool`**: runs each tool call the model requested.
-3. **`agent`** (entrypoint): repeats steps 1 and 2 until the model calls `SubmitBriefing`. If the model answers in text instead, or reaches 15 rounds, it is asked once more with `SubmitBriefing` forced. If its `SubmitBriefing` call doesn't fit the schema, the validation errors go back to it as that call's result, and it gets one more forced call. The other tools stay defined on that call, because the message history contains calls to them.
+3. **`agent`** (entrypoint): repeats steps 1 and 2 until the model calls `SubmitBriefing` on its own. If it calls `SubmitBriefing` in the same response as other tools, such as a `fetch_article` for an article the briefing cites, those calls run first and the briefing is sent back, so the model submits again with their results. The prompt also asks for the briefing in a turn of its own. If the model answers in text instead, or reaches 15 rounds, it is asked once more with `SubmitBriefing` forced. If its `SubmitBriefing` call doesn't fit the schema, the validation errors go back to it as that call's result, and it gets one more forced call. The other tools stay defined on that call, because the message history contains calls to them.
 4. **`main()`** creates a `RunState`, runs the agent on the request, renders the submitted briefing as Markdown and calls **`run_evals()`** on it, with the `fetched` and `headline_meta` dictionaries the run's tools filled.
 
 ### Tools
@@ -110,7 +128,7 @@ The agent is built with the LangGraph **Functional API** (`@entrypoint` and `@ta
 | Tool | Purpose | Behaviour |
 |------|---------|-----------|
 | `get_headlines(feed_url)` | Discover stories | Refuses anything except the exact URLs in `ALLOWED_FEEDS` before fetching, downloads the feed with the same protected client as articles (30 seconds per read and up to 3 attempts, so about 2 minutes if the server stops responding), and discards a feed that redirected off the allowlist. Parses the RSS feed with `feedparser` and returns up to **15** numbered items (title, published date, link, summary). Records each `link → published` date in `headline_meta` (normalised URL as key) for the freshness check. A feed that doesn't parse cleanly is downloaded once more, and if that second download fails, the first parse is used when it had items. A body that is still gzip after download is decompressed, up to 5 MB, and each item's date is stored in RFC 2822 whatever form the feed uses. Returns `FETCH_FAILED: <url>` if the feed has no items. |
-| `fetch_article(url)` | Read a story | Refuses non-allowlisted URLs, then refuses once **5** articles have been fetched or **10** downloads have failed (`FETCH_LIMIT_REACHED`), and refuses a link already tried twice. It downloads the link exactly as the feed gave it, not the URL the model wrote, so the model can't add a query string that carries data to the site. Otherwise downloads the page with `trafilatura`, with certificate checks always on and its protection against private addresses. It discards a page that redirected off the allowlist, then extracts the article body, truncates it at a `Published -` footer if present, caps it at **4,000 characters**, records exactly that text in `fetched` and returns it with `Source: <url>`. Failed fetches return `FETCH_FAILED: <url>` and don't count toward the limit. |
+| `fetch_article(url)` | Read a story | Refuses non-allowlisted URLs, then refuses once **5** articles have been fetched or **10** downloads have failed (`FETCH_LIMIT_REACHED`), and refuses a link already tried twice. It downloads the link exactly as the feed gave it, not the URL the model wrote, so the model can't add a query string that carries data to the site. Otherwise downloads the page with `trafilatura`, with certificate checks always on and its protection against private addresses. It discards a page that redirected off the allowlist, then extracts the article body and removes page text that isn't the story: The Hindu's `Published -` footer, India TV's "Also read" link to another story, agency, reporter and photo credits, and BBC's `- Published` line. It caps the result at **4,000 characters**, records exactly that text in `fetched` and returns it with `Source: <url>`. Failed fetches return `FETCH_FAILED: <url>` and don't count toward the limit. |
 
 ### News Sources
 
@@ -158,6 +176,8 @@ The model submits the briefing by calling `SubmitBriefing`, defined in [`briefin
 | `check_fetch_notes(notes)` | Flags notes that name no source or step of the run (words such as "feed", "article", "fetched", "loaded" or "instructions") and don't only say "none" or "No issues.", so news can't hide in the notes. | List of flagged notes |
 | `check_freshness(cited, headline_meta, max_hours=72, now=None)` | Flags stories older than `max_hours`, using RFC 2822 feed dates. | `(stale, unknown_date)` |
 | `check_grounding(claim, article_text)` | Finds the numbers and capitalised names in a claim that its article doesn't contain. Case and plural endings are ignored, numbers match in any format or as words, including compounds such as "twenty-five", and sentence-start words, dates and the cited outlets' names are skipped. Abbreviations such as US must appear exactly, written with or without full stops, or be spelled out as a whole name, as "United Nations" spells out UN. | List of missing numbers and names |
+| `check_repeated_items(briefing)` | Flags two items, in the same section or across both, when most of the words of the shorter one are also in the other (60 per cent or more, ignoring common words). In 26 live briefings no two items shared more than 23 per cent. Two different points from one article aren't a repeat. | List of repeated pairs |
+| `INDIA_TERMS` | An India item should mention India, Indian, New Delhi or Delhi, the MEA or the Ministry of External Affairs, the Prime Minister (Modi) or the External Affairs Minister (Jaishankar). The names count because India items about the Prime Minister often name only him: a list without them flagged 4 of 9 real India items. | Used by `run_evals` for `india_off_topic` |
 | `run_evals(briefing, fetched, headline_meta, ...)` | Runs the checks on each item against its own source, prints a summary, and writes the report if given a path. | Report `dict` |
 
 ### Pass/Fail Criteria
@@ -171,7 +191,7 @@ A briefing **passes** only if all of these are true:
 - every quote appears word for word in its item's source (`unverified_quotes` is empty), **and**
 - every fetch note describes the run (`notes_with_news` is empty).
 
-Stale stories, unknown dates and items that name things their article doesn't (`ungrounded`) are reported as **warnings**. Stale stories don't fail a briefing because feeds keep important stories for days, so failing on age would fail correct briefings.
+Stale stories, unknown dates, items that name things their article doesn't (`ungrounded`), India items that never mention India (`india_off_topic`) and repeated items (`repeated_items`) are reported as **warnings**. Stale stories don't fail a briefing because feeds keep important stories for days, so failing on age would fail correct briefings.
 
 When the eval fails, the agent script exits with code 1.
 
@@ -194,6 +214,8 @@ Each run writes a new report to `eval_reports/eval_report_<UTC start time>.json`
     "notes_with_news": [],
     "off_list": [],
     "ungrounded": [],
+    "india_off_topic": [],
+    "repeated_items": [],
     "stale": [],
     "unknown_date": [],
     "suspected_injections": [],
@@ -417,7 +439,7 @@ The agent reads text written by strangers, so any article or feed item may try t
 **Reduces risk, but can be beaten:**
 
 - The `<untrusted_content>` fence and the system prompt's security rules rely on the model's judgement.
-- `find_injection_signs` is a blocklist. Paraphrases, other languages and Unicode tricks get past it, as the `hindi_instruction`, `reworded_request` and `zero_width` attacks show. It only flags content for the report and the model, except encoded payloads, which are withheld because they can make the API refuse the whole request. Google News links are skipped by the encoded payload check, because their article ids look like encoded text, so a payload written inside a `news.google.com` URL still gets past it. Links to every other host, including BBC and The Hindu, are checked, but only a run that mixes capitals and lower case the way encoded text does counts, so ordinary long paths aren't withheld. In a test of 2,000 random encoded payloads written as URLs, 13 got past this.
+- `find_injection_signs` is a blocklist. Paraphrases, other languages and Unicode tricks get past it, as the `hindi_instruction`, `reworded_request` and `zero_width` attacks show. It only flags content for the report and the model, except encoded payloads, which are withheld because they can make the API refuse the whole request. Links in fetched text are checked too, but only a run that mixes capitals and lower case the way encoded text does counts, so ordinary long paths aren't withheld. Links with encoded ids, such as Google News article links, do count, so an article quoting one is withheld; a scan of 175 real articles from the five feeds on 8 November 2026 found none that do. In a test of 2,000 random encoded payloads written as URLs, 13 got past this.
 
 **Not solved:** a false claim can still reach the briefing, attributed to a real article, and the eval will pass it, because the eval checks where a claim came from and not whether it's true. A planted "correction" can't be reliably told apart from a genuine one.
 
@@ -494,6 +516,7 @@ After that, each fix to the citation check exposed another way the model could w
 - **Citations are checked for provenance, not accuracy.** The evals prove that every cited URL points to an article the agent actually fetched. They do not prove that the claim next to the citation is supported by that article. A bullet can cite a real, fetched article and still misstate what it says. Only quotes are checked against the article: `check_quote` fails a quote that was changed or made up. For everything else, `ungrounded` warns when an item names a place, person or number its article doesn't contain, but a claim built from words the article does contain, such as the wrong country doing the right thing, passes. In 14 live runs with structured output on 8 November 2026 it flagged 21 of 70 items. Most were real details from outside the article body: "Gulf of Oman", which was in the headline but not the body, abbreviations such as CENTCOM, and a spelling the article didn't use ("Khmelnytskyi"). Others were dates the model took from the feed, which are now ignored.
 - **The fetch notes check is a word list.** Every note must name a source or a step of the run, so a plain news claim there fails the briefing. A claim that also names its source, such as "The BBC article says the talks collapsed", still passes. In the other direction, a real fetch problem worded without any of the listed words makes the briefing fail, which errs on the safe side.
 - **The model can rewrite a link instead of copying it.** In the attack suite, a stand-in feed once gave a Hindu link with a `/news/national/` path from the International feed, and the model cited it with `/news/international/` instead in 6 of 20 runs. The eval fails such a citation, because that page was never fetched. No real run has done this yet: all 70 items in 14 live runs on 8 November 2026 cited fetched articles.
+- **The model sometimes repeats an India story in both sections.** With the Indian feeds added, it put the same story, such as Bangladesh's request to extradite Sheikh Hasina, in both sections in 5 of 10 live runs on 8 November 2026. After the `india` field was reworded to say a development goes in one section only, it still did so in 2 of 8. `repeated_items` reports it as a warning.
 - **Links are matched without their query string.** `normalize_url` drops `?...`, which is right for BBC and The Hindu, where tracking parameters follow the article path. On a site that identifies articles by a query parameter, such as `?id=123`, two different articles would count as one.
 - **India-focused.** The prompt and three of the five feeds (The Hindu National, India TV, The Times of India) are set up for India. Until 8 November 2026 only BBC World and The Hindu International were used, and the India section was empty in every live run, 31 in all. With the three Indian feeds added, it had an item in all 6 live runs that day, from The Hindu and India TV. The Times of India feed worked but wasn't chosen in those runs. A Google News search feed was dropped earlier the same day, because its links open the publisher's page through a script, so none of 15 tested gave the agent any article text. Firstpost refuses automated readers and isn't used.
 - **Fetch limits are per run, not per site.** The 5-article cap counts successful downloads, and a lock stops parallel calls from passing it. Each link may be downloaded twice, as the prompt's one retry allows, an article already read is sent again without a new download, a second call for a link that is still downloading is refused, and the run stops fetching after 10 failed downloads, counting downloads still running. In 8 live runs on 8 November 2026 at most 2 downloads failed.
