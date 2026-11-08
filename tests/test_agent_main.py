@@ -1629,6 +1629,18 @@ def test_feed_that_decompresses_too_large_or_corrupt_is_refused(agent_module):
     assert agent_module.decompress_feed(b"<rss/>") == b"<rss/>"
 
 
+def test_cut_off_gzip_feed_is_refused(agent_module):
+    """Checks that a gzip body that ends early is refused, not read as a whole feed.
+
+    Args:
+        agent_module: The agent module.
+    """
+    # Regression: found in review. A stream that stopped early was returned as if it were complete.
+    whole = gzip_bytes(b"<rss>" + b"<item>news</item>" * 2000 + b"</rss>")
+    assert agent_module.decompress_feed(whole[: len(whole) // 2]) is None
+    assert agent_module.decompress_feed(whole).endswith(b"</rss>")
+
+
 def test_iso_feed_dates_are_read_for_the_freshness_check(tools, monkeypatch):
     """Checks that an ISO 8601 date, as the Times of India writes them, is stored in the form the eval reads.
 

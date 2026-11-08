@@ -190,8 +190,9 @@ def decompress_feed(data: bytes) -> bytes | None:
         body = decompressor.decompress(data, MAX_FEED_BYTES)
     except zlib.error:
         return None
-    # Anything left over means the body is larger than the limit
-    if decompressor.unconsumed_tail:
+    # Only a stream that reached its end is complete. Otherwise the body was over the limit, or was
+    # cut off, and a partial feed could be read as if it were whole.
+    if not decompressor.eof:
         return None
     return body
 
